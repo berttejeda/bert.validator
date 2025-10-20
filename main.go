@@ -18,6 +18,18 @@ import (
 )
 
 /* =========================
+   Version (override via -ldflags)
+   ========================= */
+
+// Build with:
+// go build -ldflags "-X main.Version=v1.2.3 -X main.GitCommit=$(git rev-parse --short HEAD) -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+var (
+	Version   = "0.1.0"
+	GitCommit = "dev"
+	BuildDate = "unknown"
+)
+
+/* =========================
    Logging
    ========================= */
 
@@ -30,23 +42,14 @@ const (
 	ERROR
 )
 
-// Version info (override at build time with -ldflags "-X main.Version=... -X main.GitCommit=... -X main.BuildDate=...")
 var (
-	Version   = "0.1.0"
-	GitCommit = "dev"
-	BuildDate = "Mon Oct 20 16:02:54 2025"
-)
-
-
-var (
-	level      = INFO
-	showOutput bool
-	dumpScript bool
-	showVersion bool
-	manifest   string
-	levelArg   string
-
-	// These are *fallbacks* if detection fails entirely.
+	level            = INFO
+	showOutputFlag   bool
+	dumpScript       bool
+	showVersion      bool
+	strictMode       bool
+	manifest         string
+	levelArg         string
 	defaultUnixShell = "/usr/bin/bash"
 	defaultWinShell  = "powershell.exe"
 
@@ -54,6 +57,9 @@ var (
 	varPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 	// Integers or floats (with optional leading dot / scientific notation)
 	numPattern = regexp.MustCompile(`^\s*-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+\-]?\d+)?\s*$`)
+
+	// duplicate key tracking (incremented whenever we detect duplicates)
+	dupKeyCount int
 )
 
 func logAt(l logLevel, format string, a ...any) {
@@ -113,11 +119,8 @@ func detectInterpreterKind(path string) interpreterKind {
 	}
 }
 
-// findExecutable tries exec.LookPath first; if the candidate looks like an absolute
-// path, ensure it exists. Returns the first found executable, else empty string.
 func findExecutable(candidates []string) string {
 	for _, cand := range candidates {
-		// Absolute or explicit path?
 		if strings.Contains(cand, "/") || strings.Contains(cand, `\`) {
 			if st, err := os.Stat(cand); err == nil && !st.IsDir() {
 				return cand
@@ -131,18 +134,13 @@ func findExecutable(candidates []string) string {
 	return ""
 }
 
-// autoDetectDefaultInterpreter picks a sensible default based on OS,
-// searching PATH and common locations for popular interpreters.
-// Returns (path, kind). If nothing is found, returns a conservative fallback.
 func autoDetectDefaultInterpreter() (string, interpreterKind) {
 	switch runtime.GOOS {
 	case "windows":
-		// Prefer PowerShell Core (pwsh), then Windows PowerShell, then ComSpec/cmd
 		winCandidates := []string{
 			"pwsh.exe", "pwsh",
 			"powershell.exe", "powershell",
 		}
-		// ComSpec might be something like C:\Windows\System32\cmd.exe
 		if comspec := os.Getenv("ComSpec"); strings.TrimSpace(comspec) != "" {
 			winCandidates = append(winCandidates, comspec)
 		}
@@ -150,11 +148,8 @@ func autoDetectDefaultInterpreter() (string, interpreterKind) {
 		if p := findExecutable(winCandidates); p != "" {
 			return p, detectInterpreterKind(p)
 		}
-		// Fallback
 		return defaultWinShell, detectInterpreterKind(defaultWinShell)
-
 	case "darwin":
-		// Prefer Homebrew bash if present, then system bash, then zsh/sh, then python3/python
 		macCandidates := []string{
 			"/opt/homebrew/bin/bash",
 			"/usr/local/bin/bash",
@@ -168,8 +163,7 @@ func autoDetectDefaultInterpreter() (string, interpreterKind) {
 			return p, detectInterpreterKind(p)
 		}
 		return defaultUnixShell, detectInterpreterKind(defaultUnixShell)
-
-	default: // "linux" and others (treat as Unix-like)
+	default: // linux/unix
 		linuxCandidates := []string{
 			"/usr/bin/bash", "/bin/bash", "bash",
 			"zsh", "/usr/bin/zsh", "/bin/zsh",
@@ -185,7 +179,7 @@ func autoDetectDefaultInterpreter() (string, interpreterKind) {
 }
 
 /* =========================
-   YAML helpers (preserve order)
+   YAML helpers (preserve order) + dup warnings
    ========================= */
 
 type kv struct {
@@ -207,6 +201,25 @@ func getMapValue(m *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
+// warnDuplicateKeys logs WARN for any duplicate keys in a mapping node,
+// increments a global dup counter, and leaves first occurrence as the winner.
+func warnDuplicateKeys(m *yaml.Node, context string) {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return
+	}
+	seen := map[string]int{}
+	for i := 0; i < len(m.Content); i += 2 {
+		k := m.Content[i]
+		seen[k.Value]++
+	}
+	for k, n := range seen {
+		if n > 1 {
+			logAt(WARN, "Duplicate key %q in %s; the first occurrence will be used.", k, context)
+			dupKeyCount++
+		}
+	}
+}
+
 func toString(n *yaml.Node) string {
 	if n == nil {
 		return ""
@@ -221,7 +234,7 @@ func toString(n *yaml.Node) string {
 	return strings.TrimSpace(buf.String())
 }
 
-func orderedVars(mapNode *yaml.Node) ([]kv, error) {
+func orderedVars(mapNode *yaml.Node, context string) ([]kv, error) {
 	out := []kv{}
 	if mapNode == nil {
 		return out, nil
@@ -229,14 +242,20 @@ func orderedVars(mapNode *yaml.Node) ([]kv, error) {
 	if mapNode.Kind != yaml.MappingNode {
 		return nil, errors.New("vars must be a mapping")
 	}
+	warnDuplicateKeys(mapNode, context+" vars")
+	seen := map[string]bool{}
 	for i := 0; i < len(mapNode.Content); i += 2 {
 		k := mapNode.Content[i]
 		v := mapNode.Content[i+1]
 		key := k.Value
+		if seen[key] {
+			continue // first wins
+		}
 		if !nameRegex.MatchString(key) {
 			return nil, fmt.Errorf("invalid variable name for shell: %q", key)
 		}
 		out = append(out, kv{Key: key, Value: toString(v)})
+		seen[key] = true
 	}
 	return out, nil
 }
@@ -266,29 +285,23 @@ func mergeVars(globals, locals []kv) (mergedList []kv, mergedMap map[string]stri
    Quoters / headers per interpreter
    ========================= */
 
-// For bash header assignments, leave numeric literals (int/float) unquoted
-// so arithmetic contexts like (( var > 0 )) don’t choke. Quote everything else.
+// numeric literals unquoted for bash arithmetic; everything else quoted
 func bashFormatValue(s string) string {
 	if numPattern.MatchString(s) {
 		return strings.TrimSpace(s)
 	}
-	// Otherwise, double-quote and escape for safe runtime expansion of ${...} / $(...)
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return `"` + s + `"`
 }
 
 func psQuote(s string) string {
-	// PowerShell double-quoted string; escape backtick and quote.
 	s = strings.ReplaceAll(s, "`", "``")
 	s = strings.ReplaceAll(s, `"`, "`\"")
 	return `"` + s + `"`
 }
 
 func cmdQuoteValue(s string) string {
-	// Use: set "KEY=value"
-	// - double % to avoid immediate env expansion
-	// - double " inside quotes
 	s = strings.ReplaceAll(s, "%", "%%")
 	s = strings.ReplaceAll(s, `"`, `""`)
 	return s
@@ -348,8 +361,16 @@ func renderMsg(msg string, vars map[string]string) string {
 }
 
 /* =========================
-   Manifest model + parsing
+   Manifest model + parsing (defaults + per-validation show_output)
    ========================= */
+
+type manifestDefaults struct {
+	InterpreterPath  string
+	InterpreterFlags []string
+	EnvOnly          bool
+	ShowOutput       bool
+	ShowOutputSet    bool
+}
 
 type validation struct {
 	Name             string
@@ -361,35 +382,69 @@ type validation struct {
 	LocalVarsOrdered []kv
 	LocalVarsMap     map[string]string
 	EnvOnly          bool
+	EnvOnlySet       bool // explicitly set in manifest
+	ShowOutput       bool // per-validation override of --show-output
+	ShowOutputSet    bool
 }
 
-func parseManifest(root *yaml.Node) (globals []kv, vals []validation, err error) {
+func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, vals []validation, err error) {
+	dupKeyCount = 0 // reset for each parse
+
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, nil, errors.New("invalid YAML document")
+		return nil, manifestDefaults{}, nil, errors.New("invalid YAML document")
 	}
 	top := root.Content[0]
 	if top.Kind != yaml.MappingNode {
-		return nil, nil, errors.New("top-level YAML must be a mapping")
+		return nil, manifestDefaults{}, nil, errors.New("top-level YAML must be a mapping")
+	}
+
+	// warn duplicates at top level
+	warnDuplicateKeys(top, "top-level")
+
+	// defaults (optional)
+	if d := getMapValue(top, "defaults"); d != nil && d.Kind == yaml.MappingNode {
+		warnDuplicateKeys(d, "defaults")
+		if eo := getMapValue(d, "env_only"); eo != nil {
+			defs.EnvOnly = strings.EqualFold(strings.TrimSpace(toString(eo)), "true")
+		}
+		if so := getMapValue(d, "show_output"); so != nil {
+			defs.ShowOutput = strings.EqualFold(strings.TrimSpace(toString(so)), "true")
+			defs.ShowOutputSet = true
+		}
+		if di := getMapValue(d, "interpreters"); di != nil && di.Kind == yaml.MappingNode {
+			warnDuplicateKeys(di, "defaults.interpreters")
+			if s := getMapValue(di, "script"); s != nil && strings.TrimSpace(toString(s)) != "" {
+				defs.InterpreterPath = strings.TrimSpace(toString(s))
+			}
+			if f := getMapValue(di, "flags"); f != nil && f.Kind == yaml.SequenceNode {
+				for _, n := range f.Content {
+					defs.InterpreterFlags = append(defs.InterpreterFlags, toString(n))
+				}
+			}
+		}
 	}
 
 	// top-level vars
 	if gv := getMapValue(top, "vars"); gv != nil {
-		globals, err = orderedVars(gv)
-		if err != nil {
-			return nil, nil, fmt.Errorf("top-level vars: %w", err)
+		gl, err2 := orderedVars(gv, "top-level")
+		if err2 != nil {
+			return nil, manifestDefaults{}, nil, fmt.Errorf("top-level vars: %w", err2)
 		}
+		globals = gl
 	}
 
 	// validations
 	vNode := getMapValue(top, "validations")
 	if vNode == nil || vNode.Kind != yaml.SequenceNode {
-		return nil, nil, errors.New("`validations` must be a sequence")
+		return nil, manifestDefaults{}, nil, errors.New("`validations` must be a sequence")
 	}
 
 	for _, item := range vNode.Content {
 		if item.Kind != yaml.MappingNode {
-			return nil, nil, errors.New("each validation must be a mapping")
+			return nil, manifestDefaults{}, nil, errors.New("each validation must be a mapping")
 		}
+
+		warnDuplicateKeys(item, "validation")
 
 		var name string
 		var body *yaml.Node
@@ -410,17 +465,20 @@ func parseManifest(root *yaml.Node) (globals []kv, vals []validation, err error)
 			name = item.Content[0].Value
 			body = item.Content[1]
 		} else {
-			return nil, nil, errors.New("validation missing a name")
+			return nil, manifestDefaults{}, nil, errors.New("validation missing a name")
 		}
 
 		if body == nil || body.Kind != yaml.MappingNode {
-			return nil, nil, fmt.Errorf("validation %q body must be a mapping", name)
+			return nil, manifestDefaults{}, nil, fmt.Errorf("validation %q body must be a mapping", name)
 		}
+
+		warnDuplicateKeys(body, fmt.Sprintf("validation %q", name))
 
 		script := toString(getMapValue(body, "script"))
 
 		var passMsg, failMsg string
 		if outcomes := getMapValue(body, "outcomes"); outcomes != nil && outcomes.Kind == yaml.MappingNode {
+			warnDuplicateKeys(outcomes, fmt.Sprintf("validation %q outcomes", name))
 			if pass := getMapValue(outcomes, "pass"); pass != nil {
 				passMsg = toString(getMapValue(pass, "message"))
 			}
@@ -438,8 +496,9 @@ func parseManifest(root *yaml.Node) (globals []kv, vals []validation, err error)
 		interp := ""
 		var flags []string
 		if interps := getMapValue(body, "interpreters"); interps != nil && interps.Kind == yaml.MappingNode {
-			if s := getMapValue(interps, "script"); s != nil && toString(s) != "" {
-				interp = toString(s)
+			warnDuplicateKeys(interps, fmt.Sprintf("validation %q interpreters", name))
+			if s := getMapValue(interps, "script"); s != nil && strings.TrimSpace(toString(s)) != "" {
+				interp = strings.TrimSpace(toString(s))
 			}
 			if f := getMapValue(interps, "flags"); f != nil && f.Kind == yaml.SequenceNode {
 				for _, n := range f.Content {
@@ -449,16 +508,26 @@ func parseManifest(root *yaml.Node) (globals []kv, vals []validation, err error)
 		}
 
 		envOnly := false
+		envOnlySet := false
 		if eo := getMapValue(body, "env_only"); eo != nil {
 			envOnly = strings.EqualFold(strings.TrimSpace(toString(eo)), "true")
+			envOnlySet = true
+		}
+
+		showOutputVal := false
+		showOutputSet := false
+		if so := getMapValue(body, "show_output"); so != nil {
+			showOutputVal = strings.EqualFold(strings.TrimSpace(toString(so)), "true")
+			showOutputSet = true
 		}
 
 		var localOrdered []kv
 		if lv := getMapValue(body, "vars"); lv != nil {
-			localOrdered, err = orderedVars(lv)
-			if err != nil {
-				return nil, nil, fmt.Errorf("validation %q vars: %w", name, err)
+			lo, err2 := orderedVars(lv, fmt.Sprintf("validation %q", name))
+			if err2 != nil {
+				return nil, manifestDefaults{}, nil, fmt.Errorf("validation %q vars: %w", name, err2)
 			}
+			localOrdered = lo
 		}
 		localMap := map[string]string{}
 		for _, p := range localOrdered {
@@ -475,9 +544,18 @@ func parseManifest(root *yaml.Node) (globals []kv, vals []validation, err error)
 			LocalVarsOrdered: localOrdered,
 			LocalVarsMap:     localMap,
 			EnvOnly:          envOnly,
+			EnvOnlySet:       envOnlySet,
+			ShowOutput:       showOutputVal,
+			ShowOutputSet:    showOutputSet,
 		})
 	}
-	return globals, vals, nil
+
+	// If strict mode is on and we saw duplicates, fail parsing.
+	if strictMode && dupKeyCount > 0 {
+		return nil, manifestDefaults{}, nil, fmt.Errorf("manifest contains %d duplicate key(s); re-run without --strict to see WARN logs", dupKeyCount)
+	}
+
+	return globals, defs, vals, nil
 }
 
 /* =========================
@@ -493,7 +571,7 @@ func writeTemp(content, suffix string) (string, error) {
 	if _, err := io.WriteString(f, content); err != nil {
 		return "", err
 	}
-	_ = f.Chmod(0o700) // best-effort
+	_ = f.Chmod(0o700)
 	return f.Name(), nil
 }
 
@@ -521,25 +599,21 @@ func runWithInterpreter(interpreter string, flags []string, script string, extra
 	}
 	defer os.Remove(path)
 
-	// Build argument list
 	var args []string
 	switch kind {
 	case interpPowerShell:
-		// If no custom flags, use safe defaults
 		if len(flags) == 0 {
 			args = []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path}
 		} else {
 			args = append(flags, path)
 		}
 	case interpCmd:
-		// cmd always needs /C <file>
 		if len(flags) > 0 {
-			args = append(flags, "/C", path) // user flags precede /C file
+			args = append(flags, "/C", path)
 		} else {
 			args = []string{"/C", path}
 		}
 	default:
-		// shell/other: flags first, then script path (typical CLI behavior)
 		if len(flags) > 0 {
 			args = append(flags, path)
 		} else {
@@ -549,7 +623,6 @@ func runWithInterpreter(interpreter string, flags []string, script string, extra
 
 	cmd := exec.Command(interpreter, args...)
 
-	// Environment
 	env := os.Environ()
 	if len(extraEnv) > 0 {
 		for k, v := range extraEnv {
@@ -590,9 +663,10 @@ func runWithInterpreter(interpreter string, flags []string, script string, extra
 func main() {
 	flag.StringVar(&manifest, "manifest", "", "Path to YAML manifest")
 	flag.StringVar(&levelArg, "log-level", "INFO", "Log level: DEBUG, INFO, WARN, ERROR")
-	flag.BoolVar(&showOutput, "show-output", false, "Show child stdout/stderr at DEBUG")
+	flag.BoolVar(&showOutputFlag, "show-output", false, "Show child STDOUT/STDERR (overridden by per-validation show_output and defaults.show_output)")
 	flag.BoolVar(&dumpScript, "dump-script", false, "Dump final assembled scripts at DEBUG")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
+	flag.BoolVar(&strictMode, "strict", false, "Fail with non-zero exit if duplicate keys are found in the manifest")
 	flag.Parse()
 
 	if showVersion {
@@ -604,7 +678,7 @@ func main() {
 		manifest = flag.Arg(0)
 	}
 	if manifest == "" {
-		fmt.Fprintln(os.Stderr, "Usage: validator --manifest <path> [--log-level DEBUG] [--show-output] [--dump-script]")
+		fmt.Fprintln(os.Stderr, "Usage: validator --manifest <path> [--log-level DEBUG] [--show-output] [--dump-script] [--version] [--strict]")
 		os.Exit(2)
 	}
 	setLevel(levelArg)
@@ -621,13 +695,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	globalOrdered, validations, err := parseManifest(&root)
+	globalOrdered, defs, validations, err := parseManifest(&root)
 	if err != nil {
 		logAt(ERROR, "Invalid manifest: %v", err)
 		os.Exit(2)
 	}
 
-	// Compute OS-aware default interpreter once, for log visibility.
 	autoInterp, autoKind := autoDetectDefaultInterpreter()
 	logAt(INFO, "Using auto-detected default interpreter: %s", autoInterp)
 
@@ -648,17 +721,34 @@ func main() {
 			continue
 		}
 
-		// Choose interpreter: manifest override or auto-detected default
+		// Interpreter path: per-validation > defaults > auto-detect
 		interpPath := strings.TrimSpace(v.InterpreterPath)
-		kind := interpOther
+		var kind interpreterKind
 		if interpPath == "" {
-			interpPath = autoInterp
-			kind = autoKind
+			if strings.TrimSpace(defs.InterpreterPath) != "" {
+				interpPath = strings.TrimSpace(defs.InterpreterPath)
+				kind = detectInterpreterKind(interpPath)
+			} else {
+				interpPath = autoInterp
+				kind = autoKind
+			}
 		} else {
 			kind = detectInterpreterKind(interpPath)
 		}
 
-		// Merge vars & prepare script
+		// Flags: per-validation > defaults > (internal PS defaults in runWithInterpreter)
+		flags := v.InterpreterFlags
+		if len(flags) == 0 && len(defs.InterpreterFlags) > 0 {
+			flags = append([]string(nil), defs.InterpreterFlags...)
+		}
+
+		// env_only: if not explicitly set in validation, inherit defaults
+		envOnly := v.EnvOnly
+		if !v.EnvOnlySet {
+			envOnly = defs.EnvOnly
+		}
+
+		// Merge vars
 		mergedList, mergedMap := mergeVars(globalOrdered, v.LocalVarsOrdered)
 		logAt(DEBUG, "[%s] Merged vars: %v", v.Name, mergedMap)
 
@@ -666,7 +756,7 @@ func main() {
 		header := ""
 
 		// Only prepend headers when not env-only
-		if !v.EnvOnly {
+		if !envOnly {
 			switch kind {
 			case interpShell, interpPowerShell, interpCmd:
 				header = buildHeader(kind, mergedList)
@@ -680,7 +770,7 @@ func main() {
 
 		extraEnv := map[string]string{}
 		// Ensure vars reach the script via environment in env-only mode or for non-shell interpreters
-		if v.EnvOnly || kind == interpOther {
+		if envOnly || kind == interpOther {
 			for k, val := range mergedMap {
 				extraEnv[k] = val
 			}
@@ -690,7 +780,7 @@ func main() {
 			logAt(DEBUG, "\n--- [%s] FINAL SCRIPT ---\n%s\n--- end ---", v.Name, finalScript)
 		}
 
-		res, err := runWithInterpreter(interpPath, v.InterpreterFlags, finalScript, extraEnv, kind)
+		res, err := runWithInterpreter(interpPath, flags, finalScript, extraEnv, kind)
 		if err != nil {
 			logAt(ERROR, "[%s] Execution error: %v", v.Name, err)
 			overallRC = 1
@@ -698,12 +788,22 @@ func main() {
 			continue
 		}
 
-		if showOutput && level <= DEBUG {
-			if strings.TrimSpace(res.Stdout) != "" {
-				logAt(DEBUG, "[%s] STDOUT:\n%s", v.Name, strings.TrimSpace(res.Stdout))
+		// Effective show_output: per-validation > defaults > CLI flag
+		effectiveShowOutput := showOutputFlag
+		if defs.ShowOutputSet {
+			effectiveShowOutput = defs.ShowOutput
+		}
+		if v.ShowOutputSet {
+			effectiveShowOutput = v.ShowOutput
+		}
+
+		// Print child output when enabled — at INFO, regardless of global log level gate
+		if effectiveShowOutput {
+			if out := strings.TrimSpace(res.Stdout); out != "" {
+				logAt(INFO, "[%s] STDOUT:\n%s", v.Name, out)
 			}
-			if strings.TrimSpace(res.Stderr) != "" {
-				logAt(DEBUG, "[%s] STDERR:\n%s", v.Name, strings.TrimSpace(res.Stderr))
+			if errOut := strings.TrimSpace(res.Stderr); errOut != "" {
+				logAt(INFO, "[%s] STDERR:\n%s", v.Name, errOut)
 			}
 		}
 
