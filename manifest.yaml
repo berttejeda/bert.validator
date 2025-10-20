@@ -1,0 +1,40 @@
+vars:
+  my_global_var: my_global_value
+  
+validations:
+  - name: "Count>0"
+    script: |-
+      echo "Checking ${node}"
+      exit 0
+      if (( count > 0 )); then
+        exit 1
+      else
+        exit 0
+      fi
+    outcomes:
+      fail:
+        message: Count ${count} is higher than 0 for ${node}!
+      pass:
+        message: Count ${count} is 0 for ${node}!
+    vars:
+      count: 0
+      node: my-node
+  - name: "Length<4"
+    script: |-
+      echo "Checking ${SITE_NAME}"
+      echo "Session ID is ${SESSION_ID}"
+      if (( length < 4 )); then
+        exit 0
+      else
+        exit 1
+      fi
+    outcomes:
+      fail:
+        message: Length ${length} is more than 4 for site ${SITE_NAME}!
+      pass:
+        message: Length ${length} is less than 4 for site ${SITE_NAME}!
+    vars:
+      length: 0
+      SITE_NAME: site1
+      SESSION_TOKEN: $(curl -s https://session-server.example.com/api/v2/get-session-token)
+      SESSION_ID: ${USER}-${SITE_NAME}-${my_global_var}-${SESSION_TOKEN}
