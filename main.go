@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"flag"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -21,8 +23,6 @@ import (
    Version (override via -ldflags)
    ========================= */
 
-// Build with:
-// go build -ldflags "-X main.Version=v1.2.3 -X main.GitCommit=$(git rev-parse --short HEAD) -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var (
 	Version   = "0.1.0"
 	GitCommit = "dev"
@@ -48,6 +48,9 @@ var (
 	dumpScript       bool
 	showVersion      bool
 	strictMode       bool
+	colorMode        string // auto|always|never
+	useColor         bool   // resolved runtime decision
+	enableAnsiVars   bool
 	manifest         string
 	levelArg         string
 	defaultUnixShell = "/usr/bin/bash"
@@ -58,8 +61,11 @@ var (
 	// Integers or floats (with optional leading dot / scientific notation)
 	numPattern = regexp.MustCompile(`^\s*-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+\-]?\d+)?\s*$`)
 
-	// duplicate key tracking (incremented whenever we detect duplicates)
+	// duplicate key tracking
 	dupKeyCount int
+
+	// ANSI pattern (used to strip when --color=never)
+	ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 )
 
 func logAt(l logLevel, format string, a ...any) {
@@ -88,6 +94,112 @@ func setLevel(s string) {
 	default:
 		level = INFO
 	}
+}
+
+// logMultiline prints each line with a level prefix (kept for any buffered printing paths).
+func logMultiline(l logLevel, text string) {
+	if l < level || text == "" {
+		return
+	}
+	lines := strings.Split(text, "\n")
+	for _, ln := range lines {
+		logAt(l, "%s", ln)
+	}
+}
+
+/* =========================
+   Color / TTY helpers
+   (Windows impl lives in ansi_windows.go; non-Windows in ansi_unix.go)
+   ========================= */
+
+func builtinAnsiVars() []kv {
+	return []kv{
+		// reset
+		{Key: "nc", Value: "\x1b[0m"},
+
+		// regular colors
+		{Key: "black", Value: "\x1b[0;30m"},
+		{Key: "red", Value: "\x1b[0;31m"},
+		{Key: "green", Value: "\x1b[0;32m"},
+		{Key: "yellow", Value: "\x1b[0;33m"},
+		{Key: "blue", Value: "\x1b[0;34m"},
+		{Key: "purple", Value: "\x1b[0;35m"},
+		{Key: "cyan", Value: "\x1b[0;36m"},
+		{Key: "white", Value: "\x1b[0;37m"},
+
+		// bold
+		{Key: "bold_black", Value: "\x1b[1;30m"},
+		{Key: "bold_red", Value: "\x1b[1;31m"},
+		{Key: "bold_green", Value: "\x1b[1;32m"},
+		{Key: "bold_yellow", Value: "\x1b[1;33m"},
+		{Key: "bold_blue", Value: "\x1b[1;34m"},
+		{Key: "bold_purple", Value: "\x1b[1;35m"},
+		{Key: "bold_cyan", Value: "\x1b[1;36m"},
+		{Key: "bold_white", Value: "\x1b[1;37m"},
+
+		// underline
+		{Key: "underline_black", Value: "\x1b[4;30m"},
+		{Key: "underline_red", Value: "\x1b[4;31m"},
+		{Key: "underline_green", Value: "\x1b[4;32m"},
+		{Key: "underline_yellow", Value: "\x1b[4;33m"},
+		{Key: "underline_blue", Value: "\x1b[4;34m"},
+		{Key: "underline_purple", Value: "\x1b[4;35m"},
+		{Key: "underline_cyan", Value: "\x1b[4;36m"},
+		{Key: "underline_white", Value: "\x1b[4;37m"},
+
+		// background
+		{Key: "background_black", Value: "\x1b[40m"},
+		{Key: "background_red", Value: "\x1b[41m"},
+		{Key: "background_green", Value: "\x1b[42m"},
+		{Key: "background_yellow", Value: "\x1b[43m"},
+		{Key: "background_blue", Value: "\x1b[44m"},
+		{Key: "background_purple", Value: "\x1b[45m"},
+		{Key: "background_cyan", Value: "\x1b[46m"},
+		{Key: "background_white", Value: "\x1b[47m"},
+
+		// high intensity
+		{Key: "intense_black", Value: "\x1b[0;90m"},
+		{Key: "intense_red", Value: "\x1b[0;91m"},
+		{Key: "intense_green", Value: "\x1b[0;92m"},
+		{Key: "intense_yellow", Value: "\x1b[0;93m"},
+		{Key: "intense_blue", Value: "\x1b[0;94m"},
+		{Key: "intense_purple", Value: "\x1b[0;95m"},
+		{Key: "intense_cyan", Value: "\x1b[0;96m"},
+		{Key: "intense_white", Value: "\x1b[0;97m"},
+
+		// bold high intensity
+		{Key: "bold_intense_black", Value: "\x1b[1;90m"},
+		{Key: "bold_intense_red", Value: "\x1b[1;91m"},
+		{Key: "bold_intense_green", Value: "\x1b[1;92m"},
+		{Key: "bold_intense_yellow", Value: "\x1b[1;93m"},
+		{Key: "bold_intense_blue", Value: "\x1b[1;94m"},
+		{Key: "bold_intense_purple", Value: "\x1b[1;95m"},
+		{Key: "bold_intense_cyan", Value: "\x1b[1;96m"},
+		{Key: "bold_intense_white", Value: "\x1b[1;97m"},
+
+		// high intensity backgrounds
+		{Key: "background_intense_black", Value: "\x1b[0;100m"},
+		{Key: "background_intense_red", Value: "\x1b[0;101m"},
+		{Key: "background_intense_green", Value: "\x1b[0;102m"},
+		{Key: "background_intense_yellow", Value: "\x1b[0;103m"},
+		{Key: "background_intense_blue", Value: "\x1b[0;104m"},
+		{Key: "background_intense_purple", Value: "\x1b[0;105m"},
+		{Key: "background_intense_cyan", Value: "\x1b[0;106m"},
+		{Key: "background_intense_white", Value: "\x1b[0;107m"},
+	}
+}
+
+
+func stdoutIsTTY() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func stripANSI(s string) string {
+	return ansiRE.ReplaceAllString(s, "")
 }
 
 /* =========================
@@ -201,8 +313,6 @@ func getMapValue(m *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// warnDuplicateKeys logs WARN for any duplicate keys in a mapping node,
-// increments a global dup counter, and leaves first occurrence as the winner.
 func warnDuplicateKeys(m *yaml.Node, context string) {
 	if m == nil || m.Kind != yaml.MappingNode {
 		return
@@ -316,17 +426,17 @@ func buildHeader(kind interpreterKind, pairs []kv) string {
 		switch kind {
 		case interpShell:
 			b.WriteString(p.Key)
-			b.WriteByte('=')
+			b.WriteByte('=') // <-- byte, not string
 			b.WriteString(bashFormatValue(p.Value))
 		case interpPowerShell:
 			b.WriteString(`$env:`)
 			b.WriteString(p.Key)
-			b.WriteString("=")
+			b.WriteByte('=') // optional: also fine to keep as WriteString("=")
 			b.WriteString(psQuote(p.Value))
 		case interpCmd:
 			b.WriteString(`set "`)
 			b.WriteString(p.Key)
-			b.WriteString("=")
+			b.WriteByte('=') // optional: also fine to keep as WriteString("=")
 			b.WriteString(cmdQuoteValue(p.Value))
 			b.WriteString(`"`)
 		default:
@@ -335,6 +445,7 @@ func buildHeader(kind interpreterKind, pairs []kv) string {
 	}
 	return b.String()
 }
+
 
 /* =========================
    Message templating
@@ -559,7 +670,7 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, vals [
 }
 
 /* =========================
-   Process exec
+   Process exec (buffered and live-stream variants) + progress indicator
    ========================= */
 
 func writeTemp(content, suffix string) (string, error) {
@@ -582,6 +693,7 @@ type runResult struct {
 	Duration time.Duration
 }
 
+// Buffered runner (kept for non-streaming path)
 func runWithInterpreter(interpreter string, flags []string, script string, extraEnv map[string]string, kind interpreterKind) (*runResult, error) {
 	suffix := ".tmp"
 	switch kind {
@@ -656,6 +768,221 @@ func runWithInterpreter(interpreter string, flags []string, script string, extra
 	}, nil
 }
 
+// Live-stream runner: prints lines as they arrive (with prefixes) and also buffers.
+// Live-stream runner: prints lines as they arrive (with prefixes) and also buffers.
+// Now prints STDOUT/STDERR headers lazily, only when the first line arrives.
+func runWithInterpreterLive(
+	interpreter string,
+	flags []string,
+	script string,
+	extraEnv map[string]string,
+	kind interpreterKind,
+	logName string, // validation name for headers
+	stripColor bool,
+) (*runResult, error) {
+
+	suffix := ".tmp"
+	switch kind {
+	case interpShell:
+		suffix = ".sh"
+	case interpPowerShell:
+		suffix = ".ps1"
+	case interpCmd:
+		suffix = ".cmd"
+	}
+
+	path, err := writeTemp(script, suffix)
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(path)
+
+	var args []string
+	switch kind {
+	case interpPowerShell:
+		if len(flags) == 0 {
+			args = []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path}
+		} else {
+			args = append(flags, path)
+		}
+	case interpCmd:
+		if len(flags) > 0 {
+			args = append(flags, "/C", path)
+		} else {
+			args = []string{"/C", path}
+		}
+	default:
+		if len(flags) > 0 {
+			args = append(flags, path)
+		} else {
+			args = []string{path}
+		}
+	}
+
+	cmd := exec.Command(interpreter, args...)
+
+	env := os.Environ()
+	if len(extraEnv) > 0 {
+		for k, v := range extraEnv {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
+	cmd.Env = env
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	var outBuf, errBuf bytes.Buffer
+	var wg sync.WaitGroup
+
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	// Print headers lazily when first line arrives
+	var stdoutHeaderOnce sync.Once
+	var stderrHeaderOnce sync.Once
+
+	wg.Add(2)
+
+	scan := func(r io.Reader, isStdout bool) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(r)
+		// Support long lines
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 10*1024*1024)
+
+		for scanner.Scan() {
+			lineRaw := scanner.Text()
+
+			if isStdout {
+				stdoutHeaderOnce.Do(func() {
+					logAt(INFO, "[%s] STDOUT:", logName)
+				})
+			} else {
+				stderrHeaderOnce.Do(func() {
+					logAt(INFO, "[%s] STDERR:", logName)
+				})
+			}
+
+			// Log line (strip ANSI if requested)
+			lineToLog := lineRaw
+			if stripColor {
+				lineToLog = stripANSI(lineToLog)
+			}
+			logAt(INFO, "%s", lineToLog)
+
+			// Buffer raw (unstripped) to mirror non-streaming path
+			if isStdout {
+				outBuf.WriteString(lineRaw)
+				outBuf.WriteByte('\n')
+			} else {
+				errBuf.WriteString(lineRaw)
+				errBuf.WriteByte('\n')
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			// Surface scanner errors in the error buffer
+			if isStdout {
+				errBuf.WriteString(fmt.Sprintf("[stream error reading STDOUT: %v]\n", err))
+			} else {
+				errBuf.WriteString(fmt.Sprintf("[stream error reading STDERR: %v]\n", err))
+			}
+		}
+	}
+
+	go scan(stdoutPipe, true)
+	go scan(stderrPipe, false)
+
+	wg.Wait()
+	runErr := cmd.Wait()
+	dur := time.Since(start)
+
+	exit := 0
+	if runErr != nil {
+		if ee, ok := runErr.(*exec.ExitError); ok {
+			exit = ee.ExitCode()
+		} else {
+			exit = 1
+		}
+	}
+
+	return &runResult{
+		Stdout:   strings.TrimRight(outBuf.String(), "\n"),
+		Stderr:   strings.TrimRight(errBuf.String(), "\n"),
+		ExitCode: exit,
+		Duration: dur,
+	}, nil
+}
+
+
+/* =========================
+   Progress indicator for non-streaming runs
+   ========================= */
+
+func startProgress(name string) (stop func()) {
+	// If DEBUG, just print start/finish lines (no spinner).
+	if level == DEBUG {
+		start := time.Now()
+		logAt(INFO, "[%s] Running...", name)
+		return func() {
+			elapsed := time.Since(start).Round(time.Millisecond)
+			logAt(INFO, "[%s] Finished in %s", name, elapsed)
+		}
+	}
+
+	start := time.Now()
+	isTTY := stdoutIsTTY()
+	if !isTTY {
+		// Non-TTY: simple start/finish lines with timing.
+		logAt(INFO, "[%s] Running...", name)
+		return func() {
+			elapsed := time.Since(start).Round(time.Millisecond)
+			logAt(INFO, "[%s] Finished in %s", name, elapsed)
+		}
+	}
+
+	// TTY spinner with completion handshake.
+	frames := []string{"-", "\\", "|", "/"}
+	done := make(chan struct{})
+	finished := make(chan struct{}) // signal when spinner has fully cleaned up
+
+	go func() {
+		i := 0
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				// Clear spinner line and emit a terminating newline BEFORE we signal finished.
+				fmt.Fprintf(os.Stdout, "\r%s\r\n", strings.Repeat(" ", 80))
+				close(finished)
+				return
+			case <-ticker.C:
+				elapsed := time.Since(start).Round(time.Millisecond)
+				// Single, carriage-returning status line (no trailing newline).
+				fmt.Fprintf(os.Stdout, "\r[INFO]  [%s] Running %s %s", name, frames[i%len(frames)], elapsed)
+				i++
+			}
+		}
+	}()
+
+	return func() {
+		// Request stop and WAIT for newline/cleanup to complete
+		close(done)
+		<-finished
+	}
+}
+
+
+
 /* =========================
    main
    ========================= */
@@ -667,6 +994,8 @@ func main() {
 	flag.BoolVar(&dumpScript, "dump-script", false, "Dump final assembled scripts at DEBUG")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 	flag.BoolVar(&strictMode, "strict", false, "Fail with non-zero exit if duplicate keys are found in the manifest")
+	flag.BoolVar(&enableAnsiVars, "ansi-vars", true, "Expose built-in ANSI color variables to scripts (can be overridden by manifest)")
+	flag.StringVar(&colorMode, "color", "auto", "Color output: auto|always|never (affects child output pass-through)")
 	flag.Parse()
 
 	if showVersion {
@@ -674,11 +1003,25 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Resolve color mode (and enable Windows VT if necessary)
+	switch strings.ToLower(strings.TrimSpace(colorMode)) {
+	case "always":
+		useColor = true
+	case "never":
+		useColor = false
+	default: // auto
+		useColor = stdoutIsTTY()
+	}
+	if useColor {
+		// Provided by ansi_windows.go (real) or ansi_unix.go (no-op)
+		enableWindowsANSI()
+	}
+
 	if manifest == "" && flag.NArg() > 0 {
 		manifest = flag.Arg(0)
 	}
 	if manifest == "" {
-		fmt.Fprintln(os.Stderr, "Usage: validator --manifest <path> [--log-level DEBUG] [--show-output] [--dump-script] [--version] [--strict]")
+		fmt.Fprintln(os.Stderr, "Usage: validator --manifest <path> [--log-level DEBUG] [--show-output] [--dump-script] [--version] [--strict] [--color auto|always|never]")
 		os.Exit(2)
 	}
 	setLevel(levelArg)
@@ -736,7 +1079,7 @@ func main() {
 			kind = detectInterpreterKind(interpPath)
 		}
 
-		// Flags: per-validation > defaults > (internal PS defaults in runWithInterpreter)
+		// Flags: per-validation > defaults
 		flags := v.InterpreterFlags
 		if len(flags) == 0 && len(defs.InterpreterFlags) > 0 {
 			flags = append([]string(nil), defs.InterpreterFlags...)
@@ -749,19 +1092,24 @@ func main() {
 		}
 
 		// Merge vars
-		mergedList, mergedMap := mergeVars(globalOrdered, v.LocalVarsOrdered)
+		base := []kv{}
+		if enableAnsiVars {
+			base = builtinAnsiVars()
+		}
+
+		// built-ins, then globals, then locals (later entries override earlier ones)
+		mergedBG, _ := mergeVars(base, globalOrdered)
+		mergedList, mergedMap := mergeVars(mergedBG, v.LocalVarsOrdered)
+
 		logAt(DEBUG, "[%s] Merged vars: %v", v.Name, mergedMap)
 
 		finalScript := v.Script
-		header := ""
-
 		// Only prepend headers when not env-only
 		if !envOnly {
 			switch kind {
 			case interpShell, interpPowerShell, interpCmd:
-				header = buildHeader(kind, mergedList)
-				if header != "" {
-					finalScript = header + "\n" + finalScript
+				if hdr := buildHeader(kind, mergedList); hdr != "" {
+					finalScript = hdr + "\n" + finalScript
 				}
 			default:
 				// other interpreters -> no header
@@ -780,14 +1128,6 @@ func main() {
 			logAt(DEBUG, "\n--- [%s] FINAL SCRIPT ---\n%s\n--- end ---", v.Name, finalScript)
 		}
 
-		res, err := runWithInterpreter(interpPath, flags, finalScript, extraEnv, kind)
-		if err != nil {
-			logAt(ERROR, "[%s] Execution error: %v", v.Name, err)
-			overallRC = 1
-			fmt.Println()
-			continue
-		}
-
 		// Effective show_output: per-validation > defaults > CLI flag
 		effectiveShowOutput := showOutputFlag
 		if defs.ShowOutputSet {
@@ -797,14 +1137,37 @@ func main() {
 			effectiveShowOutput = v.ShowOutput
 		}
 
-		// Print child output when enabled — at INFO, regardless of global log level gate
+		var res *runResult
 		if effectiveShowOutput {
-			if out := strings.TrimSpace(res.Stdout); out != "" {
-				logAt(INFO, "[%s] STDOUT:\n%s", v.Name, out)
+			// Stream live; strip ANSI codes if color disabled
+			res, err = runWithInterpreterLive(
+				interpPath, flags, finalScript, extraEnv, kind,
+				v.Name,
+				!useColor,
+			)
+		} else {
+			// NON-STREAMING: show a progress indicator when log level is not DEBUG
+			var stopProgress func()
+			if level != DEBUG {
+				stopProgress = startProgress(v.Name)
+			} else {
+				// If DEBUG, don't show spinner; show a plain "Running..." / "Finished" pair for parity.
+				stopProgress = startProgress(v.Name)
 			}
-			if errOut := strings.TrimSpace(res.Stderr); errOut != "" {
-				logAt(INFO, "[%s] STDERR:\n%s", v.Name, errOut)
+
+			res, err = runWithInterpreter(interpPath, flags, finalScript, extraEnv, kind)
+
+			// Stop spinner / finish logs
+			if stopProgress != nil {
+				stopProgress()
 			}
+		}
+
+		if err != nil {
+			logAt(ERROR, "[%s] Execution error: %v", v.Name, err)
+			overallRC = 1
+			fmt.Println()
+			continue
 		}
 
 		passMsg := renderMsg(v.PassMessage, mergedMap)
