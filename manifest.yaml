@@ -1,28 +1,27 @@
 vars:
-  my_global_var: my_global_value
-  
+  my_global_var: "{{ .USER }}_my_global_value"
+  "{{ .USER }}": "{{ .USER }}"
+
+templates:
+  function_test: |-
+    function function_test(){
+      echo Parameter 1 value is ${yellow}${1}${nc}
+      echo Parameter 2 value is ${red}${2}${nc}
+      echo My Global Var is ${my_global_var}
+    }
+
 validations:
-  - name: "Count>0"
+  - name: "FunctionTest"
+    show_output: true
     script: |-
-      echo "Checking ${node}"
-      exit 0
-      if (( count > 0 )); then
-        exit 1
-      else
-        exit 0
-      fi
-    outcomes:
-      fail:
-        message: Count ${count} is higher than 0 for ${node}!
-      pass:
-        message: Count ${count} is 0 for ${node}!
-    vars:
-      count: 0
-      node: my-node
-  - name: "Length<4"
-    script: |-
-      echo "Checking ${SITE_NAME}"
+      {{ printf "%s\n" .function_test | nindent 6 }}
+      echo 1 2 3
+
+      # these are env vars from headers (globals/locals merged):
+      echo "Length is ${length}"
+      echo "Site is ${SITE_NAME}"
       echo "Session ID is ${SESSION_ID}"
+
       if (( length < 4 )); then
         exit 0
       else

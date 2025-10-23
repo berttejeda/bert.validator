@@ -6,6 +6,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	sprig "github.com/Masterminds/sprig/v3"
+	"gopkg.in/yaml.v3"
 	"io"
 	"os"
 	"os/exec"
@@ -14,10 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-  "text/template"
+	"text/template"
 	"time"
-   sprig "github.com/Masterminds/sprig/v3"
-	"gopkg.in/yaml.v3"
 )
 
 /* =========================
@@ -207,7 +207,6 @@ func builtinAnsiVars() []kv {
 	}
 }
 
-
 func stdoutIsTTY() bool {
 	fi, err := os.Stdout.Stat()
 	if err != nil {
@@ -227,10 +226,10 @@ func stripANSI(s string) string {
 type interpreterKind int
 
 const (
-	interpOther interpreterKind = iota
-	interpShell      // bash/sh/zsh/dash/ksh
-	interpPowerShell // powershell.exe / pwsh
-	interpCmd        // cmd.exe
+	interpOther      interpreterKind = iota
+	interpShell                      // bash/sh/zsh/dash/ksh
+	interpPowerShell                 // powershell.exe / pwsh
+	interpCmd                        // cmd.exe
 )
 
 func detectInterpreterKind(path string) interpreterKind {
@@ -464,7 +463,6 @@ func buildHeader(kind interpreterKind, pairs []kv) string {
 	return b.String()
 }
 
-
 /* =========================
    Message templating
    ========================= */
@@ -572,7 +570,6 @@ func renderTemplate(name, text string, ctx any) (string, error) {
 	return buf.String(), nil
 }
 
-
 /* =========================
    Manifest model + parsing (defaults + per-validation show_output)
    ========================= */
@@ -598,6 +595,60 @@ type validation struct {
 	EnvOnlySet       bool // explicitly set in manifest
 	ShowOutput       bool // per-validation override of --show-output
 	ShowOutputSet    bool
+}
+
+func parseManifestTemplateSection(r io.Reader) (map[string]string, error) {
+	var doc yaml.Node
+	dec := yaml.NewDecoder(r)
+	dec.KnownFields(true) // catch unknown struct fields if you later add typed nodes
+
+	if err := dec.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("decode yaml: %w", err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil, fmt.Errorf("invalid yaml: missing document")
+	}
+
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("invalid yaml: root is not a mapping")
+	}
+
+	// Find the "templates" key at the top level.
+	var templatesNode *yaml.Node
+	for i := 0; i < len(root.Content); i += 2 {
+		key := root.Content[i]
+		val := root.Content[i+1]
+		if key.Kind == yaml.ScalarNode && key.Value == "templates" {
+			templatesNode = val
+			break
+		}
+	}
+
+	if templatesNode == nil {
+		// No templates key found; return empty map (or you could return an error if you prefer).
+		return map[string]string{}, nil
+	}
+	if templatesNode.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("invalid yaml: templates is not a mapping")
+	}
+
+	// Unmarshal the templates node directly into a string map.
+	out := make(map[string]string)
+	if err := templatesNode.Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode templates: %w", err)
+	}
+
+	return out, nil
+}
+
+func loadManifest(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	return parseManifestTemplateSection(f)
 }
 
 func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, vals []validation, err error) {
@@ -1024,7 +1075,6 @@ func runWithInterpreterLive(
 	}, nil
 }
 
-
 /* =========================
    Progress indicator for non-streaming runs
    ========================= */
@@ -1085,8 +1135,6 @@ func startProgress(name string) (stop func()) {
 
 }
 
-
-
 /* =========================
    main
    ========================= */
@@ -1136,15 +1184,32 @@ func main() {
 		logAt(DEBUG, "Disabling built-in ANSI color variables because log level is DEBUG")
 	}
 
-
-	data, err := os.ReadFile(manifest)
+	_, err := os.ReadFile(manifest)
 	if err != nil {
 		logAt(ERROR, "Failed to read manifest: %v", err)
 		os.Exit(2)
 	}
+	yamlTemplateData, _ := loadManifest(manifest)
+	emptyMap := make(map[string]string)
+	env := envMap()
+	initialTmplCtx := buildTemplateContext(emptyMap, env, yamlTemplateData)
+	tmpl, err := template.New(manifest).Funcs(sprig.FuncMap()).ParseFiles(manifest)
+	if err != nil {
+		fmt.Printf("Error parsing template: %v\n", err)
+		return
+	}
+
+	var buf bytes.Buffer
+	err = tmpl.Execute(&buf, initialTmplCtx)
+	if err != nil {
+		fmt.Printf("Error executing template: %v\n", err)
+		return
+	}
+
+	var yamlData = buf.String()
 
 	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
+	if err := yaml.Unmarshal([]byte(yamlData), &root); err != nil {
 		logAt(ERROR, "Failed to parse YAML: %v", err)
 		os.Exit(2)
 	}
@@ -1217,7 +1282,6 @@ func main() {
 		logAt(DEBUG, "[%s] Merged vars: %v", v.Name, mergedMap)
 
 		// Build templating context: Env + templates + mergedVars (locals override globals)
-		env := envMap()
 		tmplCtx := buildTemplateContext(mergedMap, tplMap, env)
 
 		// Go-template the script and outcome messages (Sprig-enabled)
@@ -1250,7 +1314,6 @@ func main() {
 				continue
 			}
 		}
-
 
 		finalScript := v.Script
 		// Only prepend headers when not env-only
