@@ -14,8 +14,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+  "text/template"
 	"time"
-
+   sprig "github.com/Masterminds/sprig/v3"
 	"gopkg.in/yaml.v3"
 )
 
@@ -78,6 +79,23 @@ func logAt(l logLevel, format string, a ...any) {
 		WARN:  "[WARN]  ",
 		ERROR: "[ERROR] ",
 	}[l]
+
+	// Guard against ANSI bleed:
+	// - If colors are enabled, reset BEFORE prefix,
+	//   print the message, then reset AFTER.
+	if useColor {
+		const reset = "\x1b[0m"
+		msg := fmt.Sprintf(format, a...)
+		// Prepend reset (protect prefix) and append reset (protect next line).
+		fmt.Fprint(os.Stdout, reset)
+		fmt.Fprint(os.Stdout, prefix)
+		fmt.Fprint(os.Stdout, msg)
+		fmt.Fprint(os.Stdout, reset)
+		fmt.Fprint(os.Stdout, "\n")
+		return
+	}
+
+	// No color: normal print
 	fmt.Fprintf(os.Stdout, prefix+format+"\n", a...)
 }
 
@@ -470,6 +488,90 @@ func renderMsg(msg string, vars map[string]string) string {
 		return m
 	})
 }
+
+// Collect OS environment into a map[string]string
+func envMap() map[string]string {
+	m := make(map[string]string)
+	for _, kv := range os.Environ() {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			k := kv[:i]
+			v := kv[i+1:]
+			m[k] = v
+		}
+	}
+	return m
+}
+
+// Extract top-level `templates` (mapping of string->string) from the parsed YAML root.
+func extractTemplates(root *yaml.Node) map[string]string {
+	out := make(map[string]string)
+	if root == nil || len(root.Content) == 0 {
+		return out
+	}
+	top := root.Content[0]
+	if top == nil || top.Kind != yaml.MappingNode {
+		return out
+	}
+	tplNode := getMapValue(top, "templates")
+	if tplNode == nil || tplNode.Kind != yaml.MappingNode {
+		return out
+	}
+	// Preserve only first occurrence per key (matching your duplicate-key rule)
+	seen := map[string]bool{}
+	for i := 0; i < len(tplNode.Content); i += 2 {
+		k := tplNode.Content[i]
+		v := tplNode.Content[i+1]
+		key := k.Value
+		if seen[key] {
+			continue
+		}
+		out[key] = toString(v)
+		seen[key] = true
+	}
+	return out
+}
+
+// Build the context for Go templating (single flat namespace), plus a nested .Env map.
+// Precedence: locals > globals > templates > env (flattened). .Env always has all env vars.
+func buildTemplateContext(mergedVars map[string]string, templates map[string]string, env map[string]string) map[string]any {
+	ctx := make(map[string]any, len(env)+len(templates)+len(mergedVars)+1)
+
+	// Lowest precedence first, so later assignments override.
+	for k, v := range env {
+		ctx[k] = v
+	}
+	for k, v := range templates {
+		ctx[k] = v
+	}
+	for k, v := range mergedVars {
+		ctx[k] = v
+	}
+
+	// Always provide a dedicated Env map
+	ctx["Env"] = env
+	return ctx
+}
+
+// Render a Go template string using Sprig functions and the provided context.
+// We keep missing keys as empty (no hard error), but you can switch to Option("missingkey=error") if desired.
+func renderTemplate(name, text string, ctx any) (string, error) {
+	if strings.TrimSpace(text) == "" {
+		return text, nil
+	}
+	tpl, err := template.New(name).
+		Funcs(sprig.FuncMap()).
+		Option("missingkey=default").
+		Parse(text)
+	if err != nil {
+		return "", err
+	}
+	var buf strings.Builder
+	if err := tpl.Execute(&buf, ctx); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
 
 /* =========================
    Manifest model + parsing (defaults + per-validation show_output)
@@ -958,27 +1060,29 @@ func startProgress(name string) (stop func()) {
 		i := 0
 		ticker := time.NewTicker(120 * time.Millisecond)
 		defer ticker.Stop()
+		const reset = "\x1b[0m"
 		for {
 			select {
 			case <-done:
 				// Clear spinner line and emit a terminating newline BEFORE we signal finished.
-				fmt.Fprintf(os.Stdout, "\r%s\r\n", strings.Repeat(" ", 80))
+				// Also reset in case child left the terminal in a colored state.
+				fmt.Fprintf(os.Stdout, "\r%s%s\r\n", reset, strings.Repeat(" ", 80))
 				close(finished)
 				return
 			case <-ticker.C:
 				elapsed := time.Since(start).Round(time.Millisecond)
-				// Single, carriage-returning status line (no trailing newline).
-				fmt.Fprintf(os.Stdout, "\r[INFO]  [%s] Running %s %s", name, frames[i%len(frames)], elapsed)
+				// Start each redraw with a reset to protect the prefix from bleed.
+				fmt.Fprintf(os.Stdout, "\r%s[INFO]  [%s] Running %s %s", reset, name, frames[i%len(frames)], elapsed)
 				i++
 			}
 		}
 	}()
 
 	return func() {
-		// Request stop and WAIT for newline/cleanup to complete
 		close(done)
 		<-finished
 	}
+
 }
 
 
@@ -1026,6 +1130,13 @@ func main() {
 	}
 	setLevel(levelArg)
 
+	// Automatically disable ANSI vars when in DEBUG mode
+	if strings.ToUpper(levelArg) == "DEBUG" {
+		enableAnsiVars = false
+		logAt(DEBUG, "Disabling built-in ANSI color variables because log level is DEBUG")
+	}
+
+
 	data, err := os.ReadFile(manifest)
 	if err != nil {
 		logAt(ERROR, "Failed to read manifest: %v", err)
@@ -1037,6 +1148,8 @@ func main() {
 		logAt(ERROR, "Failed to parse YAML: %v", err)
 		os.Exit(2)
 	}
+
+	tplMap := extractTemplates(&root) // add here
 
 	globalOrdered, defs, validations, err := parseManifest(&root)
 	if err != nil {
@@ -1102,6 +1215,42 @@ func main() {
 		mergedList, mergedMap := mergeVars(mergedBG, v.LocalVarsOrdered)
 
 		logAt(DEBUG, "[%s] Merged vars: %v", v.Name, mergedMap)
+
+		// Build templating context: Env + templates + mergedVars (locals override globals)
+		env := envMap()
+		tmplCtx := buildTemplateContext(mergedMap, tplMap, env)
+
+		// Go-template the script and outcome messages (Sprig-enabled)
+		scriptTemplated, err := renderTemplate(v.Name+"_script", v.Script, tmplCtx)
+		if err != nil {
+			logAt(ERROR, "[%s] Template error in script: %v", v.Name, err)
+			overallRC = 1
+			fmt.Println()
+			continue
+		}
+		v.Script = scriptTemplated
+
+		if v.PassMessage != "" {
+			if passMsgT, err := renderTemplate(v.Name+"_pass", v.PassMessage, tmplCtx); err == nil {
+				v.PassMessage = passMsgT
+			} else {
+				logAt(ERROR, "[%s] Template error in pass message: %v", v.Name, err)
+				overallRC = 1
+				fmt.Println()
+				continue
+			}
+		}
+		if v.FailMessage != "" {
+			if failMsgT, err := renderTemplate(v.Name+"_fail", v.FailMessage, tmplCtx); err == nil {
+				v.FailMessage = failMsgT
+			} else {
+				logAt(ERROR, "[%s] Template error in fail message: %v", v.Name, err)
+				overallRC = 1
+				fmt.Println()
+				continue
+			}
+		}
+
 
 		finalScript := v.Script
 		// Only prepend headers when not env-only
