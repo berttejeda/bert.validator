@@ -1,27 +1,33 @@
 vars:
   my_global_var: "{{ .USER }}_my_global_value"
-  "{{ .USER }}": "{{ .USER }}"
+  {{ .USER }}: "{{ .USER }}"
 
 templates:
+  myvar_3: value_3
   function_test: |-
     function function_test(){
-      echo Parameter 1 value is ${yellow}${1}${nc}
-      echo Parameter 2 value is ${red}${2}${nc}
-      echo My Global Var is ${my_global_var}
+      echo -e Parameter 1 value is ${yellow}${1}${nc}
+      echo -e Parameter 2 value is ${red}${2}${nc}
+      echo -e My Global Var is ${my_global_var}
     }
+  items:
+    - name: one
+      value: 1
+    - name: two
+      value: 2
+    - name: three
+      value: 3
 
 validations:
   - name: "FunctionTest"
     show_output: true
     script: |-
       {{ printf "%s\n" .function_test | nindent 6 }}
-      echo 1 2 3
-
-      # these are env vars from headers (globals/locals merged):
+      function_test 1 2
+      echo -e ${yellow}Yellow${nc} ${red}Red${nc}
       echo "Length is ${length}"
-      echo "Site is ${SITE_NAME}"
-      echo "Session ID is ${SESSION_ID}"
-
+      echo "Count is ${count}"
+      echo "Your public IP is ${public_ip}"
       if (( length < 4 )); then
         exit 0
       else
@@ -34,6 +40,5 @@ validations:
         message: Length ${length} is less than 4 for site ${SITE_NAME}!
     vars:
       length: 0
-      SITE_NAME: site1
-      SESSION_TOKEN: $(curl -s https://session-server.example.com/api/v2/get-session-token)
-      SESSION_ID: ${USER}-${SITE_NAME}-${my_global_var}-${SESSION_TOKEN}
+      count: 5
+      public_ip: $(curl -s ifconfig.me)

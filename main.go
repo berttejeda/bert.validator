@@ -529,12 +529,16 @@ func extractTemplates(root *yaml.Node) map[string]string {
 	return out
 }
 
-// Build the context for Go templating (single flat namespace), plus a nested .Env map.
-// Precedence: locals > globals > templates > env (flattened). .Env always has all env vars.
-func buildTemplateContext(mergedVars map[string]string, templates map[string]string, env map[string]string) map[string]any {
+// buildTemplateContext flattens everything into a single namespace for templating,
+// plus a nested .Env. `templates` can contain strings, arrays, or maps.
+func buildTemplateContext(
+	mergedVars map[string]string,
+	templates map[string]any,
+	env map[string]string,
+) map[string]any {
 	ctx := make(map[string]any, len(env)+len(templates)+len(mergedVars)+1)
 
-	// Lowest precedence first, so later assignments override.
+	// lowest precedence → highest precedence
 	for k, v := range env {
 		ctx[k] = v
 	}
@@ -545,10 +549,11 @@ func buildTemplateContext(mergedVars map[string]string, templates map[string]str
 		ctx[k] = v
 	}
 
-	// Always provide a dedicated Env map
+	// always provide .Env
 	ctx["Env"] = env
 	return ctx
 }
+
 
 // Render a Go template string using Sprig functions and the provided context.
 // We keep missing keys as empty (no hard error), but you can switch to Option("missingkey=error") if desired.
@@ -597,10 +602,12 @@ type validation struct {
 	ShowOutputSet    bool
 }
 
-func parseManifestTemplateSection(r io.Reader) (map[string]string, error) {
+// parseManifestTemplateSection reads the top-level `templates:` mapping and returns it
+// as map[string]any so values can be strings, arrays, or nested maps.
+func parseManifestTemplateSection(r io.Reader) (map[string]any, error) {
 	var doc yaml.Node
 	dec := yaml.NewDecoder(r)
-	dec.KnownFields(true) // catch unknown struct fields if you later add typed nodes
+	dec.KnownFields(true)
 
 	if err := dec.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("decode yaml: %w", err)
@@ -617,32 +624,30 @@ func parseManifestTemplateSection(r io.Reader) (map[string]string, error) {
 	// Find the "templates" key at the top level.
 	var templatesNode *yaml.Node
 	for i := 0; i < len(root.Content); i += 2 {
-		key := root.Content[i]
-		val := root.Content[i+1]
-		if key.Kind == yaml.ScalarNode && key.Value == "templates" {
-			templatesNode = val
+		k := root.Content[i]
+		v := root.Content[i+1]
+		if k.Kind == yaml.ScalarNode && k.Value == "templates" {
+			templatesNode = v
 			break
 		}
 	}
 
 	if templatesNode == nil {
-		// No templates key found; return empty map (or you could return an error if you prefer).
-		return map[string]string{}, nil
+		return map[string]any{}, nil
 	}
 	if templatesNode.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("invalid yaml: templates is not a mapping")
 	}
 
-	// Unmarshal the templates node directly into a string map.
-	out := make(map[string]string)
+	out := make(map[string]any)
 	if err := templatesNode.Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode templates: %w", err)
 	}
-
 	return out, nil
 }
 
-func loadManifest(path string) (map[string]string, error) {
+
+func loadManifest(path string) (map[string]any, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
@@ -1192,7 +1197,7 @@ func main() {
 	yamlTemplateData, _ := loadManifest(manifest)
 	emptyMap := make(map[string]string)
 	env := envMap()
-	initialTmplCtx := buildTemplateContext(emptyMap, env, yamlTemplateData)
+	initialTmplCtx := buildTemplateContext(emptyMap, yamlTemplateData, env)	
 	tmpl, err := template.New(manifest).Funcs(sprig.FuncMap()).ParseFiles(manifest)
 	if err != nil {
 		fmt.Printf("Error parsing template: %v\n", err)
@@ -1282,7 +1287,13 @@ func main() {
 		logAt(DEBUG, "[%s] Merged vars: %v", v.Name, mergedMap)
 
 		// Build templating context: Env + templates + mergedVars (locals override globals)
-		tmplCtx := buildTemplateContext(mergedMap, tplMap, env)
+		
+		templatesAny := make(map[string]any, len(tplMap))
+		for k, v := range tplMap {
+			templatesAny[k] = v
+		}
+
+		tmplCtx := buildTemplateContext(mergedMap, templatesAny, env)
 
 		// Go-template the script and outcome messages (Sprig-enabled)
 		scriptTemplated, err := renderTemplate(v.Name+"_script", v.Script, tmplCtx)
