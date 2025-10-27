@@ -2,7 +2,7 @@ vars:
   my_global_var: "{{ .USER }}_my_global_value"
   {{ .USER }}: "{{ .USER }}"
 
-templates:
+templateVars:
   myvar_3: value_3
   function_test: |-
     function function_test(){

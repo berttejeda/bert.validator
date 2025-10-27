@@ -9,6 +9,7 @@ import (
 	sprig "github.com/Masterminds/sprig/v3"
 	"gopkg.in/yaml.v3"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -316,6 +317,11 @@ type kv struct {
 	Value string
 }
 
+type manifestData struct {
+	TemplateVars map[string]any
+	Content      string
+}
+
 func getMapValue(m *yaml.Node, key string) *yaml.Node {
 	if m == nil || m.Kind != yaml.MappingNode {
 		return nil
@@ -510,7 +516,7 @@ func extractTemplates(root *yaml.Node) map[string]string {
 	if top == nil || top.Kind != yaml.MappingNode {
 		return out
 	}
-	tplNode := getMapValue(top, "templates")
+	tplNode := getMapValue(top, "templateVars")
 	if tplNode == nil || tplNode.Kind != yaml.MappingNode {
 		return out
 	}
@@ -553,7 +559,6 @@ func buildTemplateContext(
 	ctx["Env"] = env
 	return ctx
 }
-
 
 // Render a Go template string using Sprig functions and the provided context.
 // We keep missing keys as empty (no hard error), but you can switch to Option("missingkey=error") if desired.
@@ -626,7 +631,7 @@ func parseManifestTemplateSection(r io.Reader) (map[string]any, error) {
 	for i := 0; i < len(root.Content); i += 2 {
 		k := root.Content[i]
 		v := root.Content[i+1]
-		if k.Kind == yaml.ScalarNode && k.Value == "templates" {
+		if k.Kind == yaml.ScalarNode && k.Value == "templateVars" {
 			templatesNode = v
 			break
 		}
@@ -646,14 +651,54 @@ func parseManifestTemplateSection(r io.Reader) (map[string]any, error) {
 	return out, nil
 }
 
+func fetchURL(url string) ([]byte, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "validator/"+Version)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-func loadManifest(path string) (map[string]any, error) {
-	f, err := os.Open(path)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		// Read a small body snippet for error context
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("HTTP %d fetching %s: %s", resp.StatusCode, url, strings.TrimSpace(string(snippet)))
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// Read manifest from local path or URL
+func readManifestSource(src string) ([]byte, error) {
+	s := strings.TrimSpace(src)
+	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+		return fetchURL(s)
+	}
+	if strings.HasPrefix(s, "file://") {
+		s = strings.TrimPrefix(s, "file://")
+	}
+	return os.ReadFile(s)
+}
+
+func loadManifest(path string) (*manifestData, error) {
+	f, err := readManifestSource(manifest)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close()
-	return parseManifestTemplateSection(f)
+	tmplVars, err := parseManifestTemplateSection(bytes.NewReader(f))
+	if err != nil {
+		return nil, fmt.Errorf("Templating error %s: %w", path, err)
+	}
+	return &manifestData{
+		TemplateVars: tmplVars,
+		Content:      string(f),
+	}, nil
+
 }
 
 func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, vals []validation, err error) {
@@ -1189,16 +1234,14 @@ func main() {
 		logAt(DEBUG, "Disabling built-in ANSI color variables because log level is DEBUG")
 	}
 
-	_, err := os.ReadFile(manifest)
-	if err != nil {
-		logAt(ERROR, "Failed to read manifest: %v", err)
-		os.Exit(2)
-	}
 	yamlTemplateData, _ := loadManifest(manifest)
 	emptyMap := make(map[string]string)
 	env := envMap()
-	initialTmplCtx := buildTemplateContext(emptyMap, yamlTemplateData, env)	
-	tmpl, err := template.New(manifest).Funcs(sprig.FuncMap()).ParseFiles(manifest)
+	initialTmplCtx := buildTemplateContext(emptyMap, yamlTemplateData.TemplateVars, env)
+	tmpl, err := template.New(manifest).
+		Funcs(sprig.FuncMap()).
+		Option("missingkey=default").
+		Parse(yamlTemplateData.Content)
 	if err != nil {
 		fmt.Printf("Error parsing template: %v\n", err)
 		return
@@ -1287,7 +1330,7 @@ func main() {
 		logAt(DEBUG, "[%s] Merged vars: %v", v.Name, mergedMap)
 
 		// Build templating context: Env + templates + mergedVars (locals override globals)
-		
+
 		templatesAny := make(map[string]any, len(tplMap))
 		for k, v := range tplMap {
 			templatesAny[k] = v
