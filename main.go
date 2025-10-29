@@ -115,17 +115,6 @@ func setLevel(s string) {
 	}
 }
 
-// logMultiline prints each line with a level prefix (kept for any buffered printing paths).
-func logMultiline(l logLevel, text string) {
-	if l < level || text == "" {
-		return
-	}
-	lines := strings.Split(text, "\n")
-	for _, ln := range lines {
-		logAt(l, "%s", ln)
-	}
-}
-
 /* =========================
    Color / TTY helpers
    (Windows impl lives in ansi_windows.go; non-Windows in ansi_unix.go)
@@ -676,6 +665,9 @@ func fetchURL(url string) ([]byte, error) {
 // Read manifest from local path or URL
 func readManifestSource(src string) ([]byte, error) {
 	s := strings.TrimSpace(src)
+	if s == "-" {
+		return io.ReadAll(os.Stdin)
+	}
 	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
 		return fetchURL(s)
 	}
@@ -686,7 +678,7 @@ func readManifestSource(src string) ([]byte, error) {
 }
 
 func loadManifest(path string) (*manifestData, error) {
-	f, err := readManifestSource(manifest)
+	f, err := readManifestSource(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -1259,6 +1251,9 @@ func main() {
 	var root yaml.Node
 	if err := yaml.Unmarshal([]byte(yamlData), &root); err != nil {
 		logAt(ERROR, "Failed to parse YAML: %v", err)
+		if level == DEBUG {
+			logAt(DEBUG, "\n--- Rendered YAML (failed to parse) ---\n%s\n--- end ---", yamlData)
+		}
 		os.Exit(2)
 	}
 
