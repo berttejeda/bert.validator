@@ -6,8 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	sprig "github.com/Masterminds/sprig/v3"
-	"gopkg.in/yaml.v3"
 	"io"
 	"net/http"
 	"os"
@@ -19,6 +17,9 @@ import (
 	"sync"
 	"text/template"
 	"time"
+
+	sprig "github.com/Masterminds/sprig/v3"
+	"gopkg.in/yaml.v3"
 )
 
 /* =========================
@@ -26,7 +27,7 @@ import (
    ========================= */
 
 var (
-	Version   = "0.1.0"
+	Version   = "0.1.1"
 	GitCommit = "dev"
 	BuildDate = "unknown"
 )
@@ -1385,7 +1386,10 @@ func main() {
 			}
 		}
 
-		if dumpScript || level == DEBUG {
+		if dumpScript {
+			logAt(INFO, "\n--- [%s] FINAL SCRIPT ---\n%s\n--- end ---", v.Name, finalScript)
+			continue
+		} else if level == DEBUG {
 			logAt(DEBUG, "\n--- [%s] FINAL SCRIPT ---\n%s\n--- end ---", v.Name, finalScript)
 		}
 
@@ -1442,6 +1446,10 @@ func main() {
 		}
 
 		fmt.Println()
+	}
+
+	if dumpScript {
+		os.Exit(0)
 	}
 
 	if overallRC == 0 {
