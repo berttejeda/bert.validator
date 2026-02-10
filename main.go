@@ -1267,15 +1267,18 @@ func main() {
 	}
 
 	autoInterp, autoKind := autoDetectDefaultInterpreter()
-	logAt(INFO, "Using auto-detected default interpreter: %s", autoInterp)
-
-	logAt(INFO, "Found %d validation(s) to run.", len(validations))
-	fmt.Println()
+	if !dumpScript {
+		logAt(INFO, "Using auto-detected default interpreter: %s", autoInterp)
+		logAt(INFO, "Found %d validation(s) to run.", len(validations))
+		fmt.Println()
+	}
 
 	overallRC := 0
 
 	for _, v := range validations {
-		logAt(INFO, "▶ Running validation: %s", v.Name)
+		if !dumpScript {
+			logAt(INFO, "▶ Running validation: %s", v.Name)
+		}
 
 		if strings.TrimSpace(v.Script) == "" {
 			logAt(WARN, "⚠ Skipped '%s': empty script.", v.Name)
@@ -1323,7 +1326,9 @@ func main() {
 		mergedBG, _ := mergeVars(base, globalOrdered)
 		mergedList, mergedMap := mergeVars(mergedBG, v.LocalVarsOrdered)
 
-		logAt(DEBUG, "[%s] Merged vars: %v", v.Name, mergedMap)
+		if !dumpScript {
+			logAt(DEBUG, "[%s] Merged vars: %v", v.Name, mergedMap)
+		}
 
 		// Build templating context: Env + templates + mergedVars (locals override globals)
 
