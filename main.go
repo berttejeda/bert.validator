@@ -1253,7 +1253,11 @@ func main() {
 		logAt(DEBUG, "Disabling built-in ANSI color variables because log level is DEBUG")
 	}
 
-	yamlTemplateData, _ := loadManifest(manifest)
+	yamlTemplateData, err := loadManifest(manifest)
+	if err != nil {
+		logAt(ERROR, "Failed to load manifest: %v", err)
+		os.Exit(2)
+	}
 	emptyMap := make(map[string]string)
 	env := envMap()
 	initialTmplCtx := buildTemplateContext(emptyMap, yamlTemplateData.TemplateVars, env)
