@@ -582,6 +582,13 @@ type manifestDefaults struct {
 	ShowOutputSet    bool
 }
 
+type functionDef struct {
+	Name   string `yaml:"name"`
+	Source string `yaml:"source"`
+}
+
+type functionsMap map[string][]functionDef
+
 type validation struct {
 	Name             string
 	Script           string
@@ -694,15 +701,15 @@ func loadManifest(path string) (*manifestData, error) {
 
 }
 
-func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, vals []validation, err error) {
+func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs functionsMap, vals []validation, err error) {
 	dupKeyCount = 0 // reset for each parse
 
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, manifestDefaults{}, nil, errors.New("invalid YAML document")
+		return nil, manifestDefaults{}, nil, nil, errors.New("invalid YAML document")
 	}
 	top := root.Content[0]
 	if top.Kind != yaml.MappingNode {
-		return nil, manifestDefaults{}, nil, errors.New("top-level YAML must be a mapping")
+		return nil, manifestDefaults{}, nil, nil, errors.New("top-level YAML must be a mapping")
 	}
 
 	// warn duplicates at top level
@@ -731,11 +738,30 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, vals [
 		}
 	}
 
+	// top-level functions (optional)
+	funcs = make(functionsMap)
+	if fNode := getMapValue(top, "functions"); fNode != nil && fNode.Kind == yaml.MappingNode {
+		warnDuplicateKeys(fNode, "functions")
+		for i := 0; i < len(fNode.Content); i += 2 {
+			k := fNode.Content[i] // interpreter key (e.g. bash, powershell)
+			v := fNode.Content[i+1]
+			key := k.Value
+			if v.Kind == yaml.SequenceNode {
+				var list []functionDef
+				if err := v.Decode(&list); err == nil {
+					funcs[key] = list
+				} else {
+					logAt(WARN, "Failed to decode functions list for %q: %v", key, err)
+				}
+			}
+		}
+	}
+
 	// top-level vars
 	if gv := getMapValue(top, "vars"); gv != nil {
 		gl, err2 := orderedVars(gv, "top-level")
 		if err2 != nil {
-			return nil, manifestDefaults{}, nil, fmt.Errorf("top-level vars: %w", err2)
+			return nil, manifestDefaults{}, nil, nil, fmt.Errorf("top-level vars: %w", err2)
 		}
 		globals = gl
 	}
@@ -743,12 +769,12 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, vals [
 	// validations
 	vNode := getMapValue(top, "validations")
 	if vNode == nil || vNode.Kind != yaml.SequenceNode {
-		return nil, manifestDefaults{}, nil, errors.New("`validations` must be a sequence")
+		return nil, manifestDefaults{}, nil, nil, errors.New("`validations` must be a sequence")
 	}
 
 	for _, item := range vNode.Content {
 		if item.Kind != yaml.MappingNode {
-			return nil, manifestDefaults{}, nil, errors.New("each validation must be a mapping")
+			return nil, manifestDefaults{}, nil, nil, errors.New("each validation must be a mapping")
 		}
 
 		warnDuplicateKeys(item, "validation")
@@ -772,11 +798,11 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, vals [
 			name = item.Content[0].Value
 			body = item.Content[1]
 		} else {
-			return nil, manifestDefaults{}, nil, errors.New("validation missing a name")
+			return nil, manifestDefaults{}, nil, nil, errors.New("validation missing a name")
 		}
 
 		if body == nil || body.Kind != yaml.MappingNode {
-			return nil, manifestDefaults{}, nil, fmt.Errorf("validation %q body must be a mapping", name)
+			return nil, manifestDefaults{}, nil, nil, fmt.Errorf("validation %q body must be a mapping", name)
 		}
 
 		warnDuplicateKeys(body, fmt.Sprintf("validation %q", name))
@@ -832,7 +858,7 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, vals [
 		if lv := getMapValue(body, "vars"); lv != nil {
 			lo, err2 := orderedVars(lv, fmt.Sprintf("validation %q", name))
 			if err2 != nil {
-				return nil, manifestDefaults{}, nil, fmt.Errorf("validation %q vars: %w", name, err2)
+				return nil, manifestDefaults{}, nil, nil, fmt.Errorf("validation %q vars: %w", name, err2)
 			}
 			localOrdered = lo
 		}
@@ -859,10 +885,10 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, vals [
 
 	// If strict mode is on and we saw duplicates, fail parsing.
 	if strictMode && dupKeyCount > 0 {
-		return nil, manifestDefaults{}, nil, fmt.Errorf("manifest contains %d duplicate key(s); re-run without --strict to see WARN logs", dupKeyCount)
+		return nil, manifestDefaults{}, nil, nil, fmt.Errorf("manifest contains %d duplicate key(s); re-run without --strict to see WARN logs", dupKeyCount)
 	}
 
-	return globals, defs, vals, nil
+	return globals, defs, funcs, vals, nil
 }
 
 /* =========================
@@ -1260,7 +1286,7 @@ func main() {
 
 	tplMap := extractTemplates(&root) // add here
 
-	globalOrdered, defs, validations, err := parseManifest(&root)
+	globalOrdered, defs, funcs, validations, err := parseManifest(&root)
 	if err != nil {
 		logAt(ERROR, "Invalid manifest: %v", err)
 		os.Exit(2)
@@ -1302,6 +1328,33 @@ func main() {
 			}
 		} else {
 			kind = detectInterpreterKind(interpPath)
+		}
+
+		// Inject functions if interpreter matches
+		// Matching logic: simple substring/base match for now
+		interpBase := strings.ToLower(filepath.Base(interpPath))
+		interpBase = strings.TrimSuffix(interpBase, ".exe")
+
+		for key, fList := range funcs {
+			// Check if key (e.g. "bash", "powershell") matches interpreter
+			// If key is exactly the base name, OR if key is "powershell" and base is "pwsh"
+			match := false
+			if key == interpBase {
+				match = true
+			} else if key == "powershell" && interpBase == "pwsh" {
+				match = true
+			} else if key == "bash" && interpBase == "sh" { // maybe?
+				// let's stick to strict-ish matching plus common aliases
+			}
+
+			if match {
+				var sb strings.Builder
+				for _, fn := range fList {
+					sb.WriteString(fn.Source)
+					sb.WriteByte('\n')
+				}
+				v.Script = sb.String() + v.Script
+			}
 		}
 
 		// Flags: per-validation > defaults
