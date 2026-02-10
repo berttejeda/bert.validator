@@ -27,7 +27,7 @@ import (
    ========================= */
 
 var (
-	Version   = "0.1.2"
+	Version   = "0.1.3"
 	GitCommit = "dev"
 	BuildDate = "unknown"
 )
@@ -1371,8 +1371,18 @@ func main() {
 
 		// Merge vars
 		base := []kv{}
+
+		// 1. Always provide MANIFEST_DIR
+		manifestDir := "."
+		if !strings.HasPrefix(manifest, "http://") && !strings.HasPrefix(manifest, "https://") {
+			if abs, err := filepath.Abs(manifest); err == nil {
+				manifestDir = filepath.Dir(abs)
+			}
+		}
+		base = append(base, kv{Key: "MANIFEST_DIR", Value: manifestDir})
+
 		if enableAnsiVars {
-			base = builtinAnsiVars()
+			base = append(base, builtinAnsiVars()...)
 		}
 
 		// built-ins, then globals, then locals (later entries override earlier ones)
