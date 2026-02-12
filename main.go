@@ -27,9 +27,9 @@ import (
    ========================= */
 
 var (
-	Version   = "0.1.4"
+	Version   = "0.2.0"
 	GitCommit = "dev"
-	BuildDate = "unknown"
+	BuildDate = "2026-02-12"
 )
 
 /* =========================
