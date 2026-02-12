@@ -1208,6 +1208,20 @@ func startProgress(name string) (stop func()) {
    main
    ========================= */
 
+// repeatedStringFlag allows -e to be specified multiple times
+type repeatedStringFlag []string
+
+func (i *repeatedStringFlag) String() string {
+	return strings.Join(*i, ", ")
+}
+
+func (i *repeatedStringFlag) Set(value string) error {
+	*i = append(*i, value)
+	return nil
+}
+
+var extraVarFlags repeatedStringFlag
+
 func main() {
 	flag.StringVar(&manifest, "manifest", "", "Path to YAML manifest")
 	flag.StringVar(&levelArg, "log-level", "INFO", "Log level: DEBUG, INFO, WARN, ERROR")
@@ -1217,6 +1231,8 @@ func main() {
 	flag.BoolVar(&strictMode, "strict", false, "Fail with non-zero exit if duplicate keys are found in the manifest")
 	flag.BoolVar(&enableAnsiVars, "ansi-vars", true, "Expose built-in ANSI color variables to scripts (can be overridden by manifest)")
 	flag.StringVar(&colorMode, "color", "auto", "Color output: auto|always|never (affects child output pass-through)")
+	flag.Var(&extraVarFlags, "extra-var", "Specify extra variables for config template as key=value pairs (can be specified multiple times)")
+	flag.Var(&extraVarFlags, "e", "Alias for --extra-var")
 	flag.Parse()
 
 	if showVersion {
@@ -1259,6 +1275,19 @@ func main() {
 		os.Exit(2)
 	}
 	emptyMap := make(map[string]string)
+	// Merge CLI extra vars into TemplateVars (CLI takes precedence)
+	if yamlTemplateData.TemplateVars == nil {
+		yamlTemplateData.TemplateVars = make(map[string]any)
+	}
+	for _, kv := range extraVarFlags {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			logAt(WARN, "Ignoring malformed extra-var: %q (expected key=value)", kv)
+			continue
+		}
+		yamlTemplateData.TemplateVars[parts[0]] = parts[1]
+	}
+
 	env := envMap()
 	initialTmplCtx := buildTemplateContext(emptyMap, yamlTemplateData.TemplateVars, env)
 	tmpl, err := template.New(manifest).
