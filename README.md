@@ -34,22 +34,22 @@ Move the `validator` binary to your PATH.
 
 Basic execution using a local manifest file:
 ```bash
-validator --manifest my_manifest.yaml
+validator --manifest manifest.yaml
 ```
 
 Run validations restricted to a specific tag:
 ```bash
-validator --manifest my_manifest.yaml -t my_tag
+validator --manifest manifest.yaml -t my_tag
 ```
 
 Override a variable defined in the manifest (JSON object strings are supported):
 ```bash
-validator --manifest my_manifest.yaml -e my_var=override_value -e user='{"name": "Alice"}'
+validator --manifest manifest.yaml -e my_var=override_value -e user='{"name": "Alice"}'
 ```
 
 Dump the rendered shell scripts locally to debug evaluating context, bypassing execution:
 ```bash
-validator --manifest my_manifest.yaml --dump-script
+validator --manifest manifest.yaml --dump-script
 ```
 
 ## Manifest Syntax
