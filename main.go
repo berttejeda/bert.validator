@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,9 +28,9 @@ import (
    ========================= */
 
 var (
-	Version   = "0.2.0"
+	Version   = "0.3.0"
 	GitCommit = "dev"
-	BuildDate = "2026-02-12"
+	BuildDate = "2026-02-23"
 )
 
 /* =========================
@@ -591,6 +592,7 @@ type functionsMap map[string][]functionDef
 
 type validation struct {
 	Name             string
+	Tags             []string `yaml:"tags"`
 	Script           string
 	PassMessage      string
 	FailMessage      string
@@ -854,6 +856,13 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			showOutputSet = true
 		}
 
+		var tags []string
+		if t := getMapValue(body, "tags"); t != nil && t.Kind == yaml.SequenceNode {
+			for _, n := range t.Content {
+				tags = append(tags, toString(n))
+			}
+		}
+
 		var localOrdered []kv
 		if lv := getMapValue(body, "vars"); lv != nil {
 			lo, err2 := orderedVars(lv, fmt.Sprintf("validation %q", name))
@@ -869,6 +878,7 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 
 		vals = append(vals, validation{
 			Name:             name,
+			Tags:             tags,
 			Script:           script,
 			PassMessage:      passMsg,
 			FailMessage:      failMsg,
@@ -1233,6 +1243,15 @@ func main() {
 	flag.StringVar(&colorMode, "color", "auto", "Color output: auto|always|never (affects child output pass-through)")
 	flag.Var(&extraVarFlags, "extra-var", "Specify extra variables for config template as key=value pairs (can be specified multiple times)")
 	flag.Var(&extraVarFlags, "e", "Alias for --extra-var")
+
+	var filterNameRegex string
+	flag.StringVar(&filterNameRegex, "name", "", "Regex pattern to filter validations by name")
+	flag.StringVar(&filterNameRegex, "n", "", "Alias for --name")
+
+	var filterTags repeatedStringFlag
+	flag.Var(&filterTags, "tag", "Filter validations by tag (can be specified multiple times)")
+	flag.Var(&filterTags, "t", "Alias for --tag")
+
 	flag.Parse()
 
 	if showVersion {
@@ -1285,7 +1304,15 @@ func main() {
 			logAt(WARN, "Ignoring malformed extra-var: %q (expected key=value)", kv)
 			continue
 		}
-		yamlTemplateData.TemplateVars[parts[0]] = parts[1]
+		key := parts[0]
+		valStr := parts[1]
+
+		var valAny any
+		if err := json.Unmarshal([]byte(valStr), &valAny); err == nil {
+			yamlTemplateData.TemplateVars[key] = valAny
+		} else {
+			yamlTemplateData.TemplateVars[key] = valStr
+		}
 	}
 
 	env := envMap()
@@ -1334,7 +1361,45 @@ func main() {
 
 	overallRC := 0
 
+	// Compile name regex if provided
+	var nameRe *regexp.Regexp
+	if filterNameRegex != "" {
+		var err error
+		nameRe, err = regexp.Compile(filterNameRegex)
+		if err != nil {
+			logAt(ERROR, "Invalid name regex: %v", err)
+			os.Exit(2)
+		}
+	}
+
 	for _, v := range validations {
+		// Filter by name
+		if nameRe != nil {
+			if !nameRe.MatchString(v.Name) {
+				continue
+			}
+		}
+
+		// Filter by tags
+		if len(filterTags) > 0 {
+			logAt(DEBUG, "Checking tags for %s: %v against filter %v", v.Name, v.Tags, filterTags)
+			found := false
+			for _, t := range filterTags {
+				for _, vt := range v.Tags {
+					if vt == t {
+						found = true
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+
 		if !dumpScript {
 			logAt(INFO, "▶ Running validation: %s", v.Name)
 		}

@@ -1,44 +1,49 @@
-vars:
-  my_global_var: "{{ .USER }}_my_global_value"
-  {{ .USER }}: "{{ .USER }}"
-
+# Define variables available to the template engine
 templateVars:
-  myvar_3: value_3
-  function_test: |-
-    function function_test(){
-      echo -e Parameter 1 value is ${yellow}${1}${nc}
-      echo -e Parameter 2 value is ${red}${2}${nc}
-      echo -e My Global Var is ${my_global_var}
-    }
-  items:
-    - name: one
-      value: 1
-    - name: two
-      value: 2
-    - name: three
-      value: 3
+  app_name: "MyApp"
 
+# Global default interpreter and settings
+defaults:
+  interpreter: "/bin/bash"
+  show_output: false
+
+# Define reusable script functions 
+functions:
+  - name: my_shared_func
+    interpreters: [sh, bash, zsh]
+    script: |
+      echo "This is a shared utility"
+
+# Global script variables mapped to environment
+vars:
+  global_var: 123
+
+# The actual assertions/validations to run
 validations:
-  - name: "FunctionTest"
-    show_output: true
-    script: |-
-      {{ printf "%s\n" .function_test | nindent 6 }}
-      function_test 1 2
-      echo -e ${yellow}Yellow${nc} ${red}Red${nc}
-      echo "Length is ${length}"
-      echo "Count is ${count}"
-      echo "Your public IP is ${public_ip}"
-      if (( length < 4 )); then
+  - name: "Check File Exists"
+    tags:
+      - "system"
+      - "core"
+    script: |
+      my_shared_func
+      if [ -f "/etc/hosts" ]; then
+        echo "{{ .app_name }} config found"
         exit 0
       else
         exit 1
       fi
     outcomes:
-      fail:
-        message: Length ${length} is more than 4 for site ${SITE_NAME}!
       pass:
-        message: Length ${length} is less than 4 for site ${SITE_NAME}!
-    vars:
-      length: 0
-      count: 5
-      public_ip: $(curl -s ifconfig.me)
+        message: "File is present"
+      fail:
+        message: "File is missing"
+
+  - name: "SkipMe"
+    tags: ["other"]
+    script: echo "Running SkipMe"
+    show_output: true
+    
+  - name: "RunAlso"
+    tags: ["run"]
+    script: echo "Running RunAlso"
+    show_output: true        
