@@ -47,3 +47,8 @@ validations:
     tags: ["run"]
     script: echo "Running RunAlso"
     show_output: true        
+
+  - name: "RunMyTag"
+    tags: ["my_tag"]
+    script: echo "Running RunMyTag"
+    show_output: true            
