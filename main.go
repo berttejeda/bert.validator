@@ -28,7 +28,7 @@ import (
    ========================= */
 
 var (
-	Version   = "0.4.0"
+	Version   = "0.5.0"
 	GitCommit = "dev"
 	BuildDate = "2026-04-02"
 )
@@ -591,17 +591,24 @@ type functionDef struct {
 type functionsMap map[string][]functionDef
 
 type includeBlock struct {
-	Name string
-	Path string
-	Vars map[string]any
+	Name          string
+	Path          string
+	Vars          map[string]any
+	PropagateTags bool
+}
+
+type outcome struct {
+	Message   string `yaml:"message"`
+	ExitCodes []int  `yaml:"exit_codes"`
 }
 
 type validation struct {
 	Name             string
 	Tags             []string `yaml:"tags"`
 	Script           string
-	PassMessage      string
-	FailMessage      string
+	Pass             outcome
+	Fail             outcome
+	Warn             outcome
 	InterpreterPath  string
 	InterpreterFlags []string
 	LocalVarsOrdered []kv
@@ -688,9 +695,7 @@ func readManifestSource(src string) ([]byte, error) {
 	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
 		return fetchURL(s)
 	}
-	if strings.HasPrefix(s, "file://") {
-		s = strings.TrimPrefix(s, "file://")
-	}
+	s = strings.TrimPrefix(s, "file://")
 	return os.ReadFile(s)
 }
 
@@ -818,21 +823,54 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 
 		script := toString(getMapValue(body, "script"))
 
-		var passMsg, failMsg string
+		var pass, fail, warn outcome
 		if outcomes := getMapValue(body, "outcomes"); outcomes != nil && outcomes.Kind == yaml.MappingNode {
 			warnDuplicateKeys(outcomes, fmt.Sprintf("validation %q outcomes", name))
-			if pass := getMapValue(outcomes, "pass"); pass != nil {
-				passMsg = toString(getMapValue(pass, "message"))
+			if pNode := getMapValue(outcomes, "pass"); pNode != nil {
+				if msg := getMapValue(pNode, "message"); msg != nil {
+					pass.Message = toString(msg)
+				}
+				if ecs := getMapValue(pNode, "exit_codes"); ecs != nil && ecs.Kind == yaml.SequenceNode {
+					for _, n := range ecs.Content {
+						if val, err := json.Number(toString(n)).Int64(); err == nil {
+							pass.ExitCodes = append(pass.ExitCodes, int(val))
+						}
+					}
+				}
 			}
-			if fail := getMapValue(outcomes, "fail"); fail != nil {
-				failMsg = toString(getMapValue(fail, "message"))
+			if fNode := getMapValue(outcomes, "fail"); fNode != nil {
+				if msg := getMapValue(fNode, "message"); msg != nil {
+					fail.Message = toString(msg)
+				}
+				if ecs := getMapValue(fNode, "exit_codes"); ecs != nil && ecs.Kind == yaml.SequenceNode {
+					for _, n := range ecs.Content {
+						if val, err := json.Number(toString(n)).Int64(); err == nil {
+							fail.ExitCodes = append(fail.ExitCodes, int(val))
+						}
+					}
+				}
+			}
+			if wNode := getMapValue(outcomes, "warn"); wNode != nil {
+				if msg := getMapValue(wNode, "message"); msg != nil {
+					warn.Message = toString(msg)
+				}
+				if ecs := getMapValue(wNode, "exit_codes"); ecs != nil && ecs.Kind == yaml.SequenceNode {
+					for _, n := range ecs.Content {
+						if val, err := json.Number(toString(n)).Int64(); err == nil {
+							warn.ExitCodes = append(warn.ExitCodes, int(val))
+						}
+					}
+				}
 			}
 		}
-		if passMsg == "" {
-			passMsg = "PASS"
+		if pass.Message == "" {
+			pass.Message = "PASS"
 		}
-		if failMsg == "" {
-			failMsg = "FAIL"
+		if fail.Message == "" {
+			fail.Message = "FAIL"
+		}
+		if warn.Message == "" {
+			warn.Message = "WARN"
 		}
 
 		interp := ""
@@ -874,12 +912,15 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 		if incNode := getMapValue(body, "includes"); incNode != nil && incNode.Kind == yaml.SequenceNode {
 			for _, n := range incNode.Content {
 				if n.Kind == yaml.MappingNode {
-					ib := includeBlock{Vars: make(map[string]any)}
+					ib := includeBlock{Vars: make(map[string]any), PropagateTags: true}
 					if nameNode := getMapValue(n, "name"); nameNode != nil {
 						ib.Name = toString(nameNode)
 					}
 					if pathNode := getMapValue(n, "path"); pathNode != nil {
 						ib.Path = toString(pathNode)
+					}
+					if propNode := getMapValue(n, "propagate_tags"); propNode != nil {
+						ib.PropagateTags = strings.EqualFold(strings.TrimSpace(toString(propNode)), "true")
 					}
 					if varsNode := getMapValue(n, "vars"); varsNode != nil && varsNode.Kind == yaml.MappingNode {
 						for i := 0; i < len(varsNode.Content); i += 2 {
@@ -914,8 +955,9 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			Name:             name,
 			Tags:             tags,
 			Script:           script,
-			PassMessage:      passMsg,
-			FailMessage:      failMsg,
+			Pass:             pass,
+			Fail:             fail,
+			Warn:             warn,
 			InterpreterPath:  interp,
 			InterpreterFlags: flags,
 			LocalVarsOrdered: localOrdered,

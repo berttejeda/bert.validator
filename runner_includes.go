@@ -206,9 +206,9 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 			}
 			v.Script = scriptTemplated
 
-			if v.PassMessage != "" {
-				if passMsgT, err := renderTemplate(v.Name+"_pass", v.PassMessage, tmplCtx); err == nil {
-					v.PassMessage = passMsgT
+			if v.Pass.Message != "" {
+				if passMsgT, err := renderTemplate(v.Name+"_pass", v.Pass.Message, tmplCtx); err == nil {
+					v.Pass.Message = passMsgT
 				} else {
 					logAt(ERROR, "[%s] Template error in pass message: %v", v.Name, err)
 					overallRC = 1
@@ -216,11 +216,21 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					continue
 				}
 			}
-			if v.FailMessage != "" {
-				if failMsgT, err := renderTemplate(v.Name+"_fail", v.FailMessage, tmplCtx); err == nil {
-					v.FailMessage = failMsgT
+			if v.Fail.Message != "" {
+				if failMsgT, err := renderTemplate(v.Name+"_fail", v.Fail.Message, tmplCtx); err == nil {
+					v.Fail.Message = failMsgT
 				} else {
 					logAt(ERROR, "[%s] Template error in fail message: %v", v.Name, err)
+					overallRC = 1
+					fmt.Println()
+					continue
+				}
+			}
+			if v.Warn.Message != "" {
+				if warnMsgT, err := renderTemplate(v.Name+"_warn", v.Warn.Message, tmplCtx); err == nil {
+					v.Warn.Message = warnMsgT
+				} else {
+					logAt(ERROR, "[%s] Template error in warn message: %v", v.Name, err)
 					overallRC = 1
 					fmt.Println()
 					continue
@@ -287,10 +297,27 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					continue
 				}
 
-				passMsg := renderMsg(v.PassMessage, mergedMap)
-				failMsg := renderMsg(v.FailMessage, mergedMap)
+				passMsg := renderMsg(v.Pass.Message, mergedMap)
+				failMsg := renderMsg(v.Fail.Message, mergedMap)
+				warnMsg := renderMsg(v.Warn.Message, mergedMap)
 
-				if res.ExitCode == 0 {
+				matchCode := func(code int, codes []int) bool {
+					for _, c := range codes {
+						if c == code {
+							return true
+						}
+					}
+					return false
+				}
+
+				if len(v.Warn.ExitCodes) > 0 && matchCode(res.ExitCode, v.Warn.ExitCodes) {
+					logAt(WARN, "⚠️ Validation '%s' WARNING: %s", v.Name, warnMsg)
+				} else if len(v.Pass.ExitCodes) > 0 && matchCode(res.ExitCode, v.Pass.ExitCodes) {
+					logAt(INFO, "✅ Validation '%s' PASSED: %s", v.Name, passMsg)
+				} else if len(v.Fail.ExitCodes) > 0 && matchCode(res.ExitCode, v.Fail.ExitCodes) {
+					logAt(ERROR, "❌ Validation '%s' FAILED: %s", v.Name, failMsg)
+					overallRC = 1
+				} else if res.ExitCode == 0 {
 					logAt(INFO, "✅ Validation '%s' PASSED: %s", v.Name, passMsg)
 				} else {
 					logAt(ERROR, "❌ Validation '%s' FAILED: %s", v.Name, failMsg)
@@ -325,7 +352,14 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					incVars[k] = val
 				}
 
-				incRC := executeManifest(incPath, incVars, depth+1, ctx)
+				childCtx := ctx
+				if !inc.PropagateTags {
+					childCtxCopy := *ctx
+					childCtxCopy.FilterTags = nil
+					childCtx = &childCtxCopy
+				}
+
+				incRC := executeManifest(incPath, incVars, depth+1, childCtx)
 				if incRC != 0 {
 					overallRC = incRC
 				}
