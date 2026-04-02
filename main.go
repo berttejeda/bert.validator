@@ -28,9 +28,9 @@ import (
    ========================= */
 
 var (
-	Version   = "0.3.0"
+	Version   = "0.4.0"
 	GitCommit = "dev"
-	BuildDate = "2026-02-23"
+	BuildDate = "2026-04-02"
 )
 
 /* =========================
@@ -590,6 +590,12 @@ type functionDef struct {
 
 type functionsMap map[string][]functionDef
 
+type includeBlock struct {
+	Name string
+	Path string
+	Vars map[string]any
+}
+
 type validation struct {
 	Name             string
 	Tags             []string `yaml:"tags"`
@@ -604,6 +610,7 @@ type validation struct {
 	EnvOnlySet       bool // explicitly set in manifest
 	ShowOutput       bool // per-validation override of --show-output
 	ShowOutputSet    bool
+	Includes         []includeBlock
 }
 
 // parseManifestTemplateSection reads the top-level `templates:` mapping and returns it
@@ -863,6 +870,33 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			}
 		}
 
+		var includes []includeBlock
+		if incNode := getMapValue(body, "includes"); incNode != nil && incNode.Kind == yaml.SequenceNode {
+			for _, n := range incNode.Content {
+				if n.Kind == yaml.MappingNode {
+					ib := includeBlock{Vars: make(map[string]any)}
+					if nameNode := getMapValue(n, "name"); nameNode != nil {
+						ib.Name = toString(nameNode)
+					}
+					if pathNode := getMapValue(n, "path"); pathNode != nil {
+						ib.Path = toString(pathNode)
+					}
+					if varsNode := getMapValue(n, "vars"); varsNode != nil && varsNode.Kind == yaml.MappingNode {
+						for i := 0; i < len(varsNode.Content); i += 2 {
+							k := varsNode.Content[i].Value
+							var vAny any
+							if err := varsNode.Content[i+1].Decode(&vAny); err == nil {
+								ib.Vars[k] = vAny
+							} else {
+								ib.Vars[k] = toString(varsNode.Content[i+1])
+							}
+						}
+					}
+					includes = append(includes, ib)
+				}
+			}
+		}
+
 		var localOrdered []kv
 		if lv := getMapValue(body, "vars"); lv != nil {
 			lo, err2 := orderedVars(lv, fmt.Sprintf("validation %q", name))
@@ -890,6 +924,7 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			EnvOnlySet:       envOnlySet,
 			ShowOutput:       showOutputVal,
 			ShowOutputSet:    showOutputSet,
+			Includes:         includes,
 		})
 	}
 
@@ -1288,79 +1323,6 @@ func main() {
 		logAt(DEBUG, "Disabling built-in ANSI color variables because log level is DEBUG")
 	}
 
-	yamlTemplateData, err := loadManifest(manifest)
-	if err != nil {
-		logAt(ERROR, "Failed to load manifest: %v", err)
-		os.Exit(2)
-	}
-	emptyMap := make(map[string]string)
-	// Merge CLI extra vars into TemplateVars (CLI takes precedence)
-	if yamlTemplateData.TemplateVars == nil {
-		yamlTemplateData.TemplateVars = make(map[string]any)
-	}
-	for _, kv := range extraVarFlags {
-		parts := strings.SplitN(kv, "=", 2)
-		if len(parts) != 2 {
-			logAt(WARN, "Ignoring malformed extra-var: %q (expected key=value)", kv)
-			continue
-		}
-		key := parts[0]
-		valStr := parts[1]
-
-		var valAny any
-		if err := json.Unmarshal([]byte(valStr), &valAny); err == nil {
-			yamlTemplateData.TemplateVars[key] = valAny
-		} else {
-			yamlTemplateData.TemplateVars[key] = valStr
-		}
-	}
-
-	env := envMap()
-	initialTmplCtx := buildTemplateContext(emptyMap, yamlTemplateData.TemplateVars, env)
-	tmpl, err := template.New(manifest).
-		Funcs(sprig.FuncMap()).
-		Option("missingkey=default").
-		Parse(yamlTemplateData.Content)
-	if err != nil {
-		fmt.Printf("Error parsing template: %v\n", err)
-		return
-	}
-
-	var buf bytes.Buffer
-	err = tmpl.Execute(&buf, initialTmplCtx)
-	if err != nil {
-		fmt.Printf("Error executing template: %v\n", err)
-		return
-	}
-
-	var yamlData = buf.String()
-
-	var root yaml.Node
-	if err := yaml.Unmarshal([]byte(yamlData), &root); err != nil {
-		logAt(ERROR, "Failed to parse YAML: %v", err)
-		if level == DEBUG {
-			logAt(DEBUG, "\n--- Rendered YAML (failed to parse) ---\n%s\n--- end ---", yamlData)
-		}
-		os.Exit(2)
-	}
-
-	tplMap := extractTemplates(&root) // add here
-
-	globalOrdered, defs, funcs, validations, err := parseManifest(&root)
-	if err != nil {
-		logAt(ERROR, "Invalid manifest: %v", err)
-		os.Exit(2)
-	}
-
-	autoInterp, autoKind := autoDetectDefaultInterpreter()
-	if !dumpScript {
-		logAt(INFO, "Using auto-detected default interpreter: %s", autoInterp)
-		logAt(INFO, "Found %d validation(s) to run.", len(validations))
-		fmt.Println()
-	}
-
-	overallRC := 0
-
 	// Compile name regex if provided
 	var nameRe *regexp.Regexp
 	if filterNameRegex != "" {
@@ -1372,256 +1334,39 @@ func main() {
 		}
 	}
 
-	for _, v := range validations {
-		// Filter by name
-		if nameRe != nil {
-			if !nameRe.MatchString(v.Name) {
-				continue
-			}
-		}
-
-		// Filter by tags
-		if len(filterTags) > 0 {
-			logAt(DEBUG, "Checking tags for %s: %v against filter %v", v.Name, v.Tags, filterTags)
-			found := false
-			for _, t := range filterTags {
-				for _, vt := range v.Tags {
-					if vt == t {
-						found = true
-						break
-					}
-				}
-				if found {
-					break
-				}
-			}
-			if !found {
-				continue
-			}
-		}
-
-		if !dumpScript {
-			logAt(INFO, "▶ Running validation: %s", v.Name)
-		}
-
-		if strings.TrimSpace(v.Script) == "" {
-			logAt(WARN, "⚠ Skipped '%s': empty script.", v.Name)
-			if overallRC == 0 {
-				overallRC = 1
-			}
-			fmt.Println()
+	globalExtraVars := make(map[string]any)
+	for _, kv := range extraVarFlags {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			logAt(WARN, "Ignoring malformed extra-var: %q (expected key=value)", kv)
 			continue
 		}
-
-		// Interpreter path: per-validation > defaults > auto-detect
-		interpPath := strings.TrimSpace(v.InterpreterPath)
-		var kind interpreterKind
-		if interpPath == "" {
-			if strings.TrimSpace(defs.InterpreterPath) != "" {
-				interpPath = strings.TrimSpace(defs.InterpreterPath)
-				kind = detectInterpreterKind(interpPath)
-			} else {
-				interpPath = autoInterp
-				kind = autoKind
-			}
+		key := parts[0]
+		valStr := parts[1]
+		var valAny any
+		if err := json.Unmarshal([]byte(valStr), &valAny); err == nil {
+			globalExtraVars[key] = valAny
 		} else {
-			kind = detectInterpreterKind(interpPath)
+			globalExtraVars[key] = valStr
 		}
-
-		// Inject functions if interpreter matches
-		// Matching logic: simple substring/base match for now
-		interpBase := strings.ToLower(filepath.Base(interpPath))
-		interpBase = strings.TrimSuffix(interpBase, ".exe")
-
-		for key, fList := range funcs {
-			// Check if key (e.g. "bash", "powershell") matches interpreter
-			// If key is exactly the base name, OR if key is "powershell" and base is "pwsh"
-			match := false
-			if key == interpBase {
-				match = true
-			} else if key == "powershell" && interpBase == "pwsh" {
-				match = true
-			} else if key == "bash" && interpBase == "sh" { // maybe?
-				// let's stick to strict-ish matching plus common aliases
-			}
-
-			if match {
-				var sb strings.Builder
-				for _, fn := range fList {
-					sb.WriteString(fn.Source)
-					sb.WriteByte('\n')
-				}
-				v.Script = sb.String() + v.Script
-			}
-		}
-
-		// Flags: per-validation > defaults
-		flags := v.InterpreterFlags
-		if len(flags) == 0 && len(defs.InterpreterFlags) > 0 {
-			flags = append([]string(nil), defs.InterpreterFlags...)
-		}
-
-		// env_only: if not explicitly set in validation, inherit defaults
-		envOnly := v.EnvOnly
-		if !v.EnvOnlySet {
-			envOnly = defs.EnvOnly
-		}
-
-		// Merge vars
-		base := []kv{}
-
-		// 1. Always provide MANIFEST_DIR
-		manifestDir := "."
-		if !strings.HasPrefix(manifest, "http://") && !strings.HasPrefix(manifest, "https://") {
-			if abs, err := filepath.Abs(manifest); err == nil {
-				manifestDir = filepath.Dir(abs)
-			}
-		}
-		base = append(base, kv{Key: "MANIFEST_DIR", Value: manifestDir})
-
-		if enableAnsiVars {
-			base = append(base, builtinAnsiVars()...)
-		}
-
-		// built-ins, then globals, then locals (later entries override earlier ones)
-		mergedBG, _ := mergeVars(base, globalOrdered)
-		mergedList, mergedMap := mergeVars(mergedBG, v.LocalVarsOrdered)
-
-		if !dumpScript {
-			logAt(DEBUG, "[%s] Merged vars: %v", v.Name, mergedMap)
-		}
-
-		// Build templating context: Env + templates + mergedVars (locals override globals)
-
-		templatesAny := make(map[string]any, len(tplMap))
-		for k, v := range tplMap {
-			templatesAny[k] = v
-		}
-
-		tmplCtx := buildTemplateContext(mergedMap, templatesAny, env)
-
-		// Go-template the script and outcome messages (Sprig-enabled)
-		scriptTemplated, err := renderTemplate(v.Name+"_script", v.Script, tmplCtx)
-		if err != nil {
-			logAt(ERROR, "[%s] Template error in script: %v", v.Name, err)
-			overallRC = 1
-			fmt.Println()
-			continue
-		}
-		v.Script = scriptTemplated
-
-		if v.PassMessage != "" {
-			if passMsgT, err := renderTemplate(v.Name+"_pass", v.PassMessage, tmplCtx); err == nil {
-				v.PassMessage = passMsgT
-			} else {
-				logAt(ERROR, "[%s] Template error in pass message: %v", v.Name, err)
-				overallRC = 1
-				fmt.Println()
-				continue
-			}
-		}
-		if v.FailMessage != "" {
-			if failMsgT, err := renderTemplate(v.Name+"_fail", v.FailMessage, tmplCtx); err == nil {
-				v.FailMessage = failMsgT
-			} else {
-				logAt(ERROR, "[%s] Template error in fail message: %v", v.Name, err)
-				overallRC = 1
-				fmt.Println()
-				continue
-			}
-		}
-
-		finalScript := v.Script
-		// Only prepend headers when not env-only
-		if !envOnly {
-			switch kind {
-			case interpShell, interpPowerShell, interpCmd:
-				if hdr := buildHeader(kind, mergedList); hdr != "" {
-					finalScript = hdr + "\n" + finalScript
-				}
-			default:
-				// other interpreters -> no header
-			}
-		}
-
-		extraEnv := map[string]string{}
-		// Ensure vars reach the script via environment in env-only mode or for non-shell interpreters
-		if envOnly || kind == interpOther {
-			for k, val := range mergedMap {
-				extraEnv[k] = val
-			}
-		}
-
-		if dumpScript {
-			logAt(INFO, "\n--- [%s] FINAL SCRIPT ---\n%s\n--- end ---", v.Name, finalScript)
-			continue
-		} else if level == DEBUG {
-			logAt(DEBUG, "\n--- [%s] FINAL SCRIPT ---\n%s\n--- end ---", v.Name, finalScript)
-		}
-
-		// Effective show_output: per-validation > defaults > CLI flag
-		effectiveShowOutput := showOutputFlag
-		if defs.ShowOutputSet {
-			effectiveShowOutput = defs.ShowOutput
-		}
-		if v.ShowOutputSet {
-			effectiveShowOutput = v.ShowOutput
-		}
-
-		var res *runResult
-		if effectiveShowOutput {
-			// Stream live; strip ANSI codes if color disabled
-			res, err = runWithInterpreterLive(
-				interpPath, flags, finalScript, extraEnv, kind,
-				v.Name,
-				!useColor,
-			)
-		} else {
-			// NON-STREAMING: show a progress indicator when log level is not DEBUG
-			var stopProgress func()
-			if level != DEBUG {
-				stopProgress = startProgress(v.Name)
-			} else {
-				// If DEBUG, don't show spinner; show a plain "Running..." / "Finished" pair for parity.
-				stopProgress = startProgress(v.Name)
-			}
-
-			res, err = runWithInterpreter(interpPath, flags, finalScript, extraEnv, kind)
-
-			// Stop spinner / finish logs
-			if stopProgress != nil {
-				stopProgress()
-			}
-		}
-
-		if err != nil {
-			logAt(ERROR, "[%s] Execution error: %v", v.Name, err)
-			overallRC = 1
-			fmt.Println()
-			continue
-		}
-
-		passMsg := renderMsg(v.PassMessage, mergedMap)
-		failMsg := renderMsg(v.FailMessage, mergedMap)
-
-		if res.ExitCode == 0 {
-			logAt(INFO, "✅ Validation '%s' PASSED: %s", v.Name, passMsg)
-		} else {
-			logAt(ERROR, "❌ Validation '%s' FAILED: %s", v.Name, failMsg)
-			overallRC = 1
-		}
-
-		fmt.Println()
 	}
+
+	ctx := &runContext{
+		NameRe:          nameRe,
+		FilterTags:      filterTags,
+		GlobalExtraVars: globalExtraVars,
+	}
+
+	overallRC := executeManifest(manifest, nil, 0, ctx)
 
 	if dumpScript {
 		os.Exit(0)
 	}
 
 	if overallRC == 0 {
-		logAt(INFO, "All validations PASSED ✅")
+		logAt(INFO, "All validations PASSED \u2705")
 	} else {
-		logAt(ERROR, "One or more validations FAILED ❌")
+		logAt(ERROR, "One or more validations FAILED \u274c")
 	}
 	os.Exit(overallRC)
 }
