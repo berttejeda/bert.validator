@@ -28,9 +28,9 @@ import (
    ========================= */
 
 var (
-	Version   = "0.5.0"
+	Version   = "0.6.0"
 	GitCommit = "dev"
-	BuildDate = "2026-04-02"
+	BuildDate = "2026-04-05"
 )
 
 /* =========================
@@ -52,6 +52,7 @@ var (
 	dumpScript       bool
 	showVersion      bool
 	strictMode       bool
+	noSummary        bool
 	colorMode        string // auto|always|never
 	useColor         bool   // resolved runtime decision
 	enableAnsiVars   bool
@@ -1316,6 +1317,7 @@ func main() {
 	flag.BoolVar(&dumpScript, "dump-script", false, "Dump final assembled scripts at DEBUG")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 	flag.BoolVar(&strictMode, "strict", false, "Fail with non-zero exit if duplicate keys are found in the manifest")
+	flag.BoolVar(&noSummary, "no-summary", false, "Skip printing the summary of Pass/Fail steps at the end")
 	flag.BoolVar(&enableAnsiVars, "ansi-vars", true, "Expose built-in ANSI color variables to scripts (can be overridden by manifest)")
 	flag.StringVar(&colorMode, "color", "auto", "Color output: auto|always|never (affects child output pass-through)")
 	flag.Var(&extraVarFlags, "extra-var", "Specify extra variables for config template as key=value pairs (can be specified multiple times)")
@@ -1403,6 +1405,29 @@ func main() {
 
 	if dumpScript {
 		os.Exit(0)
+	}
+
+	if !noSummary && len(ctx.Results) > 0 {
+		fmt.Println("\n--- Validation Summary ---")
+		passCount := 0
+		failCount := 0
+		warnCount := 0
+		for _, res := range ctx.Results {
+			icon := ""
+			switch res.Status {
+			case "PASS":
+				icon = "✅"
+				passCount++
+			case "FAIL":
+				icon = "❌"
+				failCount++
+			case "WARN":
+				icon = "⚠️"
+				warnCount++
+			}
+			fmt.Printf("%s %-30s [%s]\n", icon, res.Name, res.Status)
+		}
+		fmt.Printf("\nTotal: %d (Pass: %d, Fail: %d, Warn: %d)\n", len(ctx.Results), passCount, failCount, warnCount)
 	}
 
 	if overallRC == 0 {

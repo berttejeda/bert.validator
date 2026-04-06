@@ -6,16 +6,30 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/Masterminds/sprig/v3"
 	"gopkg.in/yaml.v3"
 )
 
+type summaryResult struct {
+	Name   string
+	Status string // PASS, FAIL, WARN
+}
+
 type runContext struct {
 	NameRe          *regexp.Regexp
 	FilterTags      []string
 	GlobalExtraVars map[string]any
+	Results         []summaryResult
+	mu              sync.Mutex
+}
+
+func (ctx *runContext) addResult(name, status string) {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.Results = append(ctx.Results, summaryResult{Name: name, Status: status})
 }
 
 func executeManifest(manifestPath string, includeVars map[string]any, depth int, ctx *runContext) int {
@@ -312,16 +326,21 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 
 				if len(v.Warn.ExitCodes) > 0 && matchCode(res.ExitCode, v.Warn.ExitCodes) {
 					logAt(WARN, "⚠️ Validation '%s' WARNING: %s", v.Name, warnMsg)
+					ctx.addResult(v.Name, "WARN")
 				} else if len(v.Pass.ExitCodes) > 0 && matchCode(res.ExitCode, v.Pass.ExitCodes) {
 					logAt(INFO, "✅ Validation '%s' PASSED: %s", v.Name, passMsg)
+					ctx.addResult(v.Name, "PASS")
 				} else if len(v.Fail.ExitCodes) > 0 && matchCode(res.ExitCode, v.Fail.ExitCodes) {
 					logAt(ERROR, "❌ Validation '%s' FAILED: %s", v.Name, failMsg)
 					overallRC = 1
+					ctx.addResult(v.Name, "FAIL")
 				} else if res.ExitCode == 0 {
 					logAt(INFO, "✅ Validation '%s' PASSED: %s", v.Name, passMsg)
+					ctx.addResult(v.Name, "PASS")
 				} else {
 					logAt(ERROR, "❌ Validation '%s' FAILED: %s", v.Name, failMsg)
 					overallRC = 1
+					ctx.addResult(v.Name, "FAIL")
 				}
 			}
 		}
