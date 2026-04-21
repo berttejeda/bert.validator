@@ -7,7 +7,7 @@ defaults:
   interpreter: "/bin/bash"
   show_output: false
 
-# Define reusable script functions 
+# Define reusable script functions
 functions:
   - name: my_shared_func
     interpreters: [sh, bash, zsh]
@@ -20,6 +20,16 @@ vars:
 
 # The actual assertions/validations to run
 validations:
+  - name: "From other"
+    show_output: true
+    includes:
+      - name: other
+        path: other-manifest.yaml
+        vars:
+          myvar: "$(echo MyyyyyVarrrrr)"
+        propagate_tags: false
+    tags:
+      - gabbledegak
   - name: "Check File Exists"
     tags:
       - "system"
@@ -29,12 +39,20 @@ validations:
       if [ -f "/etc/hosts" ]; then
         echo "{{ .app_name }} config found"
         exit 0
+      elif [ ! -s "/etc/hosts" ]; then
+        exit 2
       else
         exit 1
       fi
     outcomes:
+      warn:
+        message: "File is present, but empty"
+        exit_codes: 
+          - 2
       pass:
         message: "File is present"
+        exit_codes: 
+          - 0
       fail:
         message: "File is missing"
 
@@ -42,13 +60,13 @@ validations:
     tags: ["other"]
     script: echo "Running SkipMe"
     show_output: true
-    
+
   - name: "RunAlso"
     tags: ["run"]
     script: echo "Running RunAlso"
-    show_output: true        
+    show_output: true
 
   - name: "RunMyTag"
     tags: ["my_tag"]
     script: echo "Running RunMyTag"
-    show_output: true            
+    show_output: true

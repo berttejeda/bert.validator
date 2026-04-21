@@ -1,0 +1,20 @@
+# Define variables available to the template engine
+vars:
+  myvar: '{{ .MYVAR | default "nothing" }}'
+
+# Global default interpreter and settings
+defaults:
+  interpreter: "/bin/bash"
+  show_output: true
+
+validations:
+  - name: "Included Validation"
+    show_output: true
+    tags:
+      - gabbledegonk
+    script: echo "Inclusion works!! myvar is {{ .myvar }}"
+  - name: "Included Validation 2"
+    show_output: true
+    tags:
+      - gabbledegonk
+    script: echo "Inclusion works again!"
