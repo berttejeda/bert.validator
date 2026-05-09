@@ -382,6 +382,13 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 				if incRC != 0 {
 					overallRC = incRC
 				}
+
+				// Merge child results back into the parent context when tags were not propagated
+				if childCtx != ctx {
+					ctx.mu.Lock()
+					ctx.Results = childCtx.Results
+					ctx.mu.Unlock()
+				}
 			}
 		}
 
