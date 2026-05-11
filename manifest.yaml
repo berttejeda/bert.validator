@@ -70,3 +70,14 @@ validations:
     tags: ["my_tag"]
     script: echo "Running RunMyTag"
     show_output: true
+
+  - name: "RunMyConditionalTag"
+    tags: 
+      - my_tag
+    conditions: 
+      - eval: "!no_tags()"          # only run when -t flag is provided
+      - eval: file_exists("/etc/hosts")
+      - eval: 1 == 1 
+      - eval: GOOS == "darwin"
+    script: echo "Running RunMyTag"
+    show_output: true    

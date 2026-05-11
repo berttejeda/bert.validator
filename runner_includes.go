@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"text/template"
 
 	"github.com/Masterminds/sprig/v3"
+	"github.com/expr-lang/expr"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,6 +33,39 @@ func (ctx *runContext) addResult(name, status string) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 	ctx.Results = append(ctx.Results, summaryResult{Name: name, Status: status})
+}
+
+func evaluateConditions(conditions []condition, ctx *runContext) (bool, error) {
+	env := map[string]any{
+		"no_tags": func() bool {
+			return len(ctx.FilterTags) == 0
+		},
+		"env": os.Getenv,
+		"file_exists": func(path string) bool {
+			_, err := os.Stat(path)
+			return err == nil
+		},
+		"GOOS":   runtime.GOOS,
+		"GOARCH": runtime.GOARCH,
+	}
+
+	for _, c := range conditions {
+		if c.Eval == "" {
+			continue
+		}
+		result, err := expr.Eval(c.Eval, env)
+		if err != nil {
+			return false, fmt.Errorf("condition %q: %w", c.Eval, err)
+		}
+		b, ok := result.(bool)
+		if !ok {
+			return false, fmt.Errorf("condition %q: expected bool, got %T", c.Eval, result)
+		}
+		if !b {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func executeManifest(manifestPath string, includeVars map[string]any, depth int, ctx *runContext) int {
@@ -118,6 +154,23 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 				}
 			}
 			if !found {
+				continue
+			}
+		}
+
+		if len(v.Conditions) > 0 {
+			ok, err := evaluateConditions(v.Conditions, ctx)
+			if err != nil {
+				logAt(ERROR, "⚠ Condition error for '%s': %v", v.Name, err)
+				overallRC = 1
+				ctx.addResult(v.Name, "FAIL")
+				fmt.Println()
+				continue
+			}
+			if !ok {
+				logAt(INFO, "⏭️  Skipped '%s': condition not met", v.Name)
+				ctx.addResult(v.Name, "SKIP")
+				fmt.Println()
 				continue
 			}
 		}
@@ -373,9 +426,12 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 
 				childCtx := ctx
 				if !inc.PropagateTags {
-					childCtxCopy := *ctx
-					childCtxCopy.FilterTags = nil
-					childCtx = &childCtxCopy
+					childCtx = &runContext{
+						NameRe:          ctx.NameRe,
+						FilterTags:      nil,
+						GlobalExtraVars: ctx.GlobalExtraVars,
+						Results:         ctx.Results,
+					}
 				}
 
 				incRC := executeManifest(incPath, incVars, depth+1, childCtx)
@@ -383,7 +439,6 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					overallRC = incRC
 				}
 
-				// Merge child results back into the parent context when tags were not propagated
 				if childCtx != ctx {
 					ctx.mu.Lock()
 					ctx.Results = childCtx.Results

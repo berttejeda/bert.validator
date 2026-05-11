@@ -28,9 +28,9 @@ import (
    ========================= */
 
 var (
-	Version   = "0.6.1"
+	Version   = "0.7.0"
 	GitCommit = "dev"
-	BuildDate = "2026-05-08"
+	BuildDate = "2026-05-11"
 )
 
 /* =========================
@@ -603,9 +603,14 @@ type outcome struct {
 	ExitCodes []int  `yaml:"exit_codes"`
 }
 
+type condition struct {
+	Eval string `yaml:"eval"`
+}
+
 type validation struct {
 	Name             string
 	Tags             []string `yaml:"tags"`
+	Conditions       []condition
 	Script           string
 	Pass             outcome
 	Fail             outcome
@@ -909,6 +914,19 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			}
 		}
 
+		var conditions []condition
+		if cNode := getMapValue(body, "conditions"); cNode != nil && cNode.Kind == yaml.SequenceNode {
+			for _, n := range cNode.Content {
+				if n.Kind == yaml.MappingNode {
+					var c condition
+					if evalNode := getMapValue(n, "eval"); evalNode != nil {
+						c.Eval = toString(evalNode)
+					}
+					conditions = append(conditions, c)
+				}
+			}
+		}
+
 		var includes []includeBlock
 		if incNode := getMapValue(body, "includes"); incNode != nil && incNode.Kind == yaml.SequenceNode {
 			for _, n := range incNode.Content {
@@ -955,6 +973,7 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 		vals = append(vals, validation{
 			Name:             name,
 			Tags:             tags,
+			Conditions:       conditions,
 			Script:           script,
 			Pass:             pass,
 			Fail:             fail,
@@ -1412,6 +1431,7 @@ func main() {
 		passCount := 0
 		failCount := 0
 		warnCount := 0
+		skipCount := 0
 		for _, res := range ctx.Results {
 			icon := ""
 			switch res.Status {
@@ -1424,10 +1444,13 @@ func main() {
 			case "WARN":
 				icon = "⚠️"
 				warnCount++
+			case "SKIP":
+				icon = "⏭️ "
+				skipCount++
 			}
 			fmt.Printf("%s %-30s [%s]\n", icon, res.Name, res.Status)
 		}
-		fmt.Printf("\nTotal: %d (Pass: %d, Fail: %d, Warn: %d)\n", len(ctx.Results), passCount, failCount, warnCount)
+		fmt.Printf("\nTotal: %d (Pass: %d, Fail: %d, Warn: %d, Skip: %d)\n", len(ctx.Results), passCount, failCount, warnCount, skipCount)
 	}
 
 	if overallRC == 0 {
