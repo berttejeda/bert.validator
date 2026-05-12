@@ -17,22 +17,25 @@ import (
 )
 
 type summaryResult struct {
-	Name   string
-	Status string // PASS, FAIL, WARN
+	ExecDisplay  string
+	ValidationID string
+	Name         string
+	Status       string // PASS, FAIL, WARN, SKIP
 }
 
 type runContext struct {
 	NameRe          *regexp.Regexp
 	FilterTags      []string
 	GlobalExtraVars map[string]any
+	ExecPrefix      string
 	Results         []summaryResult
 	mu              sync.Mutex
 }
 
-func (ctx *runContext) addResult(name, status string) {
+func (ctx *runContext) addResult(execDisplay, validationID, name, status string) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
-	ctx.Results = append(ctx.Results, summaryResult{Name: name, Status: status})
+	ctx.Results = append(ctx.Results, summaryResult{ExecDisplay: execDisplay, ValidationID: validationID, Name: name, Status: status})
 }
 
 func evaluateConditions(conditions []condition, ctx *runContext) (bool, error) {
@@ -66,6 +69,90 @@ func evaluateConditions(conditions []condition, ctx *runContext) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func listManifestValidations(manifestPath string, includeVars map[string]any, depth int) {
+	yamlTemplateData, err := loadManifest(manifestPath)
+	if err != nil {
+		logAt(ERROR, "Failed to load manifest: %v", err)
+		return
+	}
+	emptyMap := make(map[string]string)
+
+	if yamlTemplateData.TemplateVars == nil {
+		yamlTemplateData.TemplateVars = make(map[string]any)
+	}
+	for k, val := range includeVars {
+		yamlTemplateData.TemplateVars[k] = val
+	}
+
+	env := envMap()
+	initialTmplCtx := buildTemplateContext(emptyMap, yamlTemplateData.TemplateVars, env)
+	tmpl, err := template.New(manifestPath).
+		Funcs(sprig.FuncMap()).
+		Option("missingkey=default").
+		Parse(yamlTemplateData.Content)
+	if err != nil {
+		logAt(ERROR, "Error parsing template: %v", err)
+		return
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, initialTmplCtx); err != nil {
+		logAt(ERROR, "Error executing template: %v", err)
+		return
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal(buf.Bytes(), &root); err != nil {
+		logAt(ERROR, "Failed to parse YAML: %v", err)
+		return
+	}
+
+	_, _, _, validations, err := parseManifest(&root)
+	if err != nil {
+		logAt(ERROR, "Invalid manifest: %v", err)
+		return
+	}
+
+	prefix := strings.Repeat("  ", depth)
+	if depth == 0 {
+		fmt.Println("--- Validation List ---")
+	}
+
+	for _, v := range validations {
+		tags := ""
+		if len(v.Tags) > 0 {
+			tags = " tags=[" + strings.Join(v.Tags, ", ") + "]"
+		}
+		conditions := ""
+		if len(v.Conditions) > 0 {
+			conditions = fmt.Sprintf(" conditions=%d", len(v.Conditions))
+		}
+		fmt.Printf("%sValidation #%-2d [%s] %s%s%s\n", prefix, v.ExecNumber, v.ValidationID, v.Name, tags, conditions)
+
+		for _, inc := range v.Includes {
+			incPath := inc.Path
+			if !strings.HasPrefix(incPath, "http://") && !strings.HasPrefix(incPath, "https://") && !filepath.IsAbs(incPath) {
+				manifestDir := "."
+				if !strings.HasPrefix(manifestPath, "http://") && !strings.HasPrefix(manifestPath, "https://") {
+					if abs, err := filepath.Abs(manifestPath); err == nil {
+						manifestDir = filepath.Dir(abs)
+					}
+				}
+				incPath = filepath.Join(manifestDir, incPath)
+			}
+			incVars := make(map[string]any)
+			for k, val := range includeVars {
+				incVars[k] = val
+			}
+			for k, val := range inc.Vars {
+				incVars[k] = val
+			}
+			fmt.Printf("%s  └─ include: %s (path: %s)\n", prefix, inc.Name, inc.Path)
+			listManifestValidations(incPath, incVars, depth+1)
+		}
+	}
 }
 
 func executeManifest(manifestPath string, includeVars map[string]any, depth int, ctx *runContext) int {
@@ -161,15 +248,17 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 		if len(v.Conditions) > 0 {
 			ok, err := evaluateConditions(v.Conditions, ctx)
 			if err != nil {
-				logAt(ERROR, "⚠ Condition error for '%s': %v", v.Name, err)
+				execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
+				logAt(ERROR, "⚠ Condition error for '#%s %s %s': %v", execDisp, v.ValidationID, v.Name, err)
 				overallRC = 1
-				ctx.addResult(v.Name, "FAIL")
+				ctx.addResult(execDisp, v.ValidationID, v.Name, "FAIL")
 				fmt.Println()
 				continue
 			}
 			if !ok {
-				logAt(INFO, "⏭️  Skipped '%s': condition not met", v.Name)
-				ctx.addResult(v.Name, "SKIP")
+				execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
+				logAt(INFO, "⏭️  Skipped '#%s %s %s': condition not met", execDisp, v.ValidationID, v.Name)
+				ctx.addResult(execDisp, v.ValidationID, v.Name, "SKIP")
 				fmt.Println()
 				continue
 			}
@@ -180,7 +269,8 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 			if depth > 0 {
 				prefix = strings.Repeat("  ", depth)
 			}
-			logAt(INFO, "%s▶ Running validation: %s", prefix, v.Name)
+			execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
+			logAt(INFO, "%s▶ [#%s %s] Running validation: %s", prefix, execDisp, v.ValidationID, v.Name)
 		}
 
 		if strings.TrimSpace(v.Script) == "" {
@@ -377,23 +467,24 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					return false
 				}
 
+				execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
 				if len(v.Warn.ExitCodes) > 0 && matchCode(res.ExitCode, v.Warn.ExitCodes) {
-					logAt(WARN, "⚠️ Validation '%s' WARNING: %s", v.Name, warnMsg)
-					ctx.addResult(v.Name, "WARN")
+					logAt(WARN, "⚠️ Validation '#%s %s %s' WARNING: %s", execDisp, v.ValidationID, v.Name, warnMsg)
+					ctx.addResult(execDisp, v.ValidationID, v.Name, "WARN")
 				} else if len(v.Pass.ExitCodes) > 0 && matchCode(res.ExitCode, v.Pass.ExitCodes) {
-					logAt(INFO, "✅ Validation '%s' PASSED: %s", v.Name, passMsg)
-					ctx.addResult(v.Name, "PASS")
+					logAt(INFO, "✅ Validation '#%s %s %s' PASSED: %s", execDisp, v.ValidationID, v.Name, passMsg)
+					ctx.addResult(execDisp, v.ValidationID, v.Name, "PASS")
 				} else if len(v.Fail.ExitCodes) > 0 && matchCode(res.ExitCode, v.Fail.ExitCodes) {
-					logAt(ERROR, "❌ Validation '%s' FAILED: %s", v.Name, failMsg)
+					logAt(ERROR, "❌ Validation '#%s %s %s' FAILED: %s", execDisp, v.ValidationID, v.Name, failMsg)
 					overallRC = 1
-					ctx.addResult(v.Name, "FAIL")
+					ctx.addResult(execDisp, v.ValidationID, v.Name, "FAIL")
 				} else if res.ExitCode == 0 {
-					logAt(INFO, "✅ Validation '%s' PASSED: %s", v.Name, passMsg)
-					ctx.addResult(v.Name, "PASS")
+					logAt(INFO, "✅ Validation '#%s %s %s' PASSED: %s", execDisp, v.ValidationID, v.Name, passMsg)
+					ctx.addResult(execDisp, v.ValidationID, v.Name, "PASS")
 				} else {
-					logAt(ERROR, "❌ Validation '%s' FAILED: %s", v.Name, failMsg)
+					logAt(ERROR, "❌ Validation '#%s %s %s' FAILED: %s", execDisp, v.ValidationID, v.Name, failMsg)
 					overallRC = 1
-					ctx.addResult(v.Name, "FAIL")
+					ctx.addResult(execDisp, v.ValidationID, v.Name, "FAIL")
 				}
 			}
 		}
@@ -425,11 +516,21 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 				}
 
 				childCtx := ctx
+				parentExecDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
 				if !inc.PropagateTags {
 					childCtx = &runContext{
 						NameRe:          ctx.NameRe,
 						FilterTags:      nil,
 						GlobalExtraVars: ctx.GlobalExtraVars,
+						ExecPrefix:      parentExecDisp + ".",
+						Results:         ctx.Results,
+					}
+				} else {
+					childCtx = &runContext{
+						NameRe:          ctx.NameRe,
+						FilterTags:      ctx.FilterTags,
+						GlobalExtraVars: ctx.GlobalExtraVars,
+						ExecPrefix:      parentExecDisp + ".",
 						Results:         ctx.Results,
 					}
 				}

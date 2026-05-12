@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"os"
@@ -28,7 +29,7 @@ import (
    ========================= */
 
 var (
-	Version   = "0.7.0"
+	Version   = "0.8.0"
 	GitCommit = "dev"
 	BuildDate = "2026-05-11"
 )
@@ -53,6 +54,7 @@ var (
 	showVersion      bool
 	strictMode       bool
 	noSummary        bool
+	listValidations  bool
 	colorMode        string // auto|always|never
 	useColor         bool   // resolved runtime decision
 	enableAnsiVars   bool
@@ -608,6 +610,8 @@ type condition struct {
 }
 
 type validation struct {
+	ExecNumber       int
+	ValidationID     string
 	Name             string
 	Tags             []string `yaml:"tags"`
 	Conditions       []condition
@@ -624,6 +628,12 @@ type validation struct {
 	ShowOutput       bool // per-validation override of --show-output
 	ShowOutputSet    bool
 	Includes         []includeBlock
+}
+
+func computeValidationID(execNumber int, name string) string {
+	h := fnv.New32a()
+	fmt.Fprintf(h, "%d:%s", execNumber, name)
+	return fmt.Sprintf("%08x", h.Sum32())
 }
 
 // parseManifestTemplateSection reads the top-level `templates:` mapping and returns it
@@ -792,7 +802,7 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 		return nil, manifestDefaults{}, nil, nil, errors.New("`validations` must be a sequence")
 	}
 
-	for _, item := range vNode.Content {
+	for valIdx, item := range vNode.Content {
 		if item.Kind != yaml.MappingNode {
 			return nil, manifestDefaults{}, nil, nil, errors.New("each validation must be a mapping")
 		}
@@ -970,7 +980,12 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			localMap[p.Key] = p.Value
 		}
 
+		execNum := valIdx + 1
+		vid := computeValidationID(execNum, name)
+
 		vals = append(vals, validation{
+			ExecNumber:       execNum,
+			ValidationID:     vid,
 			Name:             name,
 			Tags:             tags,
 			Conditions:       conditions,
@@ -1337,6 +1352,7 @@ func main() {
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 	flag.BoolVar(&strictMode, "strict", false, "Fail with non-zero exit if duplicate keys are found in the manifest")
 	flag.BoolVar(&noSummary, "no-summary", false, "Skip printing the summary of Pass/Fail steps at the end")
+	flag.BoolVar(&listValidations, "list", false, "List all validations with their Execution Number and Validation ID, then exit")
 	flag.BoolVar(&enableAnsiVars, "ansi-vars", true, "Expose built-in ANSI color variables to scripts (can be overridden by manifest)")
 	flag.StringVar(&colorMode, "color", "auto", "Color output: auto|always|never (affects child output pass-through)")
 	flag.Var(&extraVarFlags, "extra-var", "Specify extra variables for config template as key=value pairs (can be specified multiple times)")
@@ -1420,6 +1436,11 @@ func main() {
 		GlobalExtraVars: globalExtraVars,
 	}
 
+	if listValidations {
+		listManifestValidations(manifest, nil, 0)
+		os.Exit(0)
+	}
+
 	overallRC := executeManifest(manifest, nil, 0, ctx)
 
 	if dumpScript {
@@ -1445,10 +1466,10 @@ func main() {
 				icon = "⚠️"
 				warnCount++
 			case "SKIP":
-				icon = "⏭️ "
+				icon = "⏭️"
 				skipCount++
 			}
-			fmt.Printf("%s %-30s [%s]\n", icon, res.Name, res.Status)
+			fmt.Printf("%s Validation #%-4s [%s] %-30s [%s]\n", icon, res.ExecDisplay, res.ValidationID, res.Name, res.Status)
 		}
 		fmt.Printf("\nTotal: %d (Pass: %d, Fail: %d, Warn: %d, Skip: %d)\n", len(ctx.Results), passCount, failCount, warnCount, skipCount)
 	}
