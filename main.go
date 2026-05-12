@@ -29,7 +29,7 @@ import (
    ========================= */
 
 var (
-	Version   = "0.8.0"
+	Version   = "0.9.0"
 	GitCommit = "dev"
 	BuildDate = "2026-05-11"
 )
@@ -55,6 +55,7 @@ var (
 	strictMode       bool
 	noSummary        bool
 	listValidations  bool
+	showFilter       string
 	colorMode        string // auto|always|never
 	useColor         bool   // resolved runtime decision
 	enableAnsiVars   bool
@@ -1353,6 +1354,7 @@ func main() {
 	flag.BoolVar(&strictMode, "strict", false, "Fail with non-zero exit if duplicate keys are found in the manifest")
 	flag.BoolVar(&noSummary, "no-summary", false, "Skip printing the summary of Pass/Fail steps at the end")
 	flag.BoolVar(&listValidations, "list", false, "List all validations with their Execution Number and Validation ID, then exit")
+	flag.StringVar(&showFilter, "show", "", "Show rendered script for validations matching the given Validation ID or name pattern, then exit")
 	flag.BoolVar(&enableAnsiVars, "ansi-vars", true, "Expose built-in ANSI color variables to scripts (can be overridden by manifest)")
 	flag.StringVar(&colorMode, "color", "auto", "Color output: auto|always|never (affects child output pass-through)")
 	flag.Var(&extraVarFlags, "extra-var", "Specify extra variables for config template as key=value pairs (can be specified multiple times)")
@@ -1434,6 +1436,7 @@ func main() {
 		NameRe:          nameRe,
 		FilterTags:      filterTags,
 		GlobalExtraVars: globalExtraVars,
+		ShowFilter:      showFilter,
 	}
 
 	if listValidations {
@@ -1443,7 +1446,7 @@ func main() {
 
 	overallRC := executeManifest(manifest, nil, 0, ctx)
 
-	if dumpScript {
+	if dumpScript || showFilter != "" {
 		os.Exit(0)
 	}
 

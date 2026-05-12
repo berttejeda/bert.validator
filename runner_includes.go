@@ -28,8 +28,27 @@ type runContext struct {
 	FilterTags      []string
 	GlobalExtraVars map[string]any
 	ExecPrefix      string
+	ShowFilter      string
 	Results         []summaryResult
 	mu              sync.Mutex
+}
+
+func matchesShowFilter(filter, validationID, name string) bool {
+	if filter == "" {
+		return false
+	}
+	if validationID == filter {
+		return true
+	}
+	if strings.Contains(strings.ToLower(name), strings.ToLower(filter)) {
+		return true
+	}
+	if re, err := regexp.Compile("(?i)" + filter); err == nil {
+		if re.MatchString(name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (ctx *runContext) addResult(execDisplay, validationID, name, status string) {
@@ -211,7 +230,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 	}
 
 	autoInterp, autoKind := autoDetectDefaultInterpreter()
-	if !dumpScript && depth == 0 {
+	if !dumpScript && ctx.ShowFilter == "" && depth == 0 {
 		logAt(INFO, "Using auto-detected default interpreter: %s", autoInterp)
 		logAt(INFO, "Found %d validation(s) to run.", len(validations))
 		fmt.Println()
@@ -249,22 +268,30 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 			ok, err := evaluateConditions(v.Conditions, ctx)
 			if err != nil {
 				execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
-				logAt(ERROR, "⚠ Condition error for '#%s %s %s': %v", execDisp, v.ValidationID, v.Name, err)
-				overallRC = 1
-				ctx.addResult(execDisp, v.ValidationID, v.Name, "FAIL")
-				fmt.Println()
+				if !dumpScript && ctx.ShowFilter == "" {
+					logAt(ERROR, "⚠ Condition error for '#%s %s %s': %v", execDisp, v.ValidationID, v.Name, err)
+					overallRC = 1
+					ctx.addResult(execDisp, v.ValidationID, v.Name, "FAIL")
+					fmt.Println()
+				} else if dumpScript {
+					fmt.Printf("\n# --- [%s] SKIPPED (condition error: %v) ---\n", v.Name, err)
+				}
 				continue
 			}
 			if !ok {
-				execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
-				logAt(INFO, "⏭️  Skipped '#%s %s %s': condition not met", execDisp, v.ValidationID, v.Name)
-				ctx.addResult(execDisp, v.ValidationID, v.Name, "SKIP")
-				fmt.Println()
+				if !dumpScript && ctx.ShowFilter == "" {
+					execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
+					logAt(INFO, "⏭️  Skipped '#%s %s %s': condition not met", execDisp, v.ValidationID, v.Name)
+					ctx.addResult(execDisp, v.ValidationID, v.Name, "SKIP")
+					fmt.Println()
+				} else if dumpScript {
+					fmt.Printf("\n# --- [%s] SKIPPED (condition not met) ---\n", v.Name)
+				}
 				continue
 			}
 		}
 
-		if !dumpScript {
+		if !dumpScript && ctx.ShowFilter == "" {
 			prefix := ""
 			if depth > 0 {
 				prefix = strings.Repeat("  ", depth)
@@ -411,8 +438,35 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 				}
 			}
 
+			if ctx.ShowFilter != "" {
+				execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
+				if matchesShowFilter(ctx.ShowFilter, v.ValidationID, v.Name) {
+					fmt.Printf("--- Validation #%s [%s] %s ---\n", execDisp, v.ValidationID, v.Name)
+					if len(v.Tags) > 0 {
+						fmt.Printf("Tags:       %s\n", strings.Join(v.Tags, ", "))
+					}
+					if len(v.Conditions) > 0 {
+						fmt.Printf("Conditions: %d\n", len(v.Conditions))
+						for _, c := range v.Conditions {
+							fmt.Printf("  - eval: %s\n", c.Eval)
+						}
+					}
+					if v.Pass.Message != "" {
+						fmt.Printf("Pass:       %s\n", v.Pass.Message)
+					}
+					if v.Fail.Message != "" {
+						fmt.Printf("Fail:       %s\n", v.Fail.Message)
+					}
+					if v.Warn.Message != "" {
+						fmt.Printf("Warn:       %s\n", v.Warn.Message)
+					}
+					fmt.Printf("\n%s\n", finalScript)
+				}
+				continue
+			}
+
 			if dumpScript {
-				logAt(INFO, "\n--- [%s] FINAL SCRIPT ---\n%s\n--- end ---", v.Name, finalScript)
+				fmt.Printf("\n# --- [%s] ---\n%s\n", v.Name, finalScript)
 			} else if level == DEBUG {
 				logAt(DEBUG, "\n--- [%s] FINAL SCRIPT ---\n%s\n--- end ---", v.Name, finalScript)
 			}
@@ -491,7 +545,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 
 		if len(v.Includes) > 0 {
 			for _, inc := range v.Includes {
-				if !dumpScript {
+				if !dumpScript && ctx.ShowFilter == "" {
 					prefix := strings.Repeat("  ", depth)
 					logAt(INFO, "%s🔗 Including manifest: %s (path: %s)", prefix, inc.Name, inc.Path)
 				}
@@ -523,6 +577,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 						FilterTags:      nil,
 						GlobalExtraVars: ctx.GlobalExtraVars,
 						ExecPrefix:      parentExecDisp + ".",
+						ShowFilter:      ctx.ShowFilter,
 						Results:         ctx.Results,
 					}
 				} else {
@@ -531,6 +586,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 						FilterTags:      ctx.FilterTags,
 						GlobalExtraVars: ctx.GlobalExtraVars,
 						ExecPrefix:      parentExecDisp + ".",
+						ShowFilter:      ctx.ShowFilter,
 						Results:         ctx.Results,
 					}
 				}
