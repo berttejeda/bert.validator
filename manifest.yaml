@@ -4,15 +4,20 @@ templateVars:
 
 # Global default interpreter and settings
 defaults:
-  interpreter: "/bin/bash"
   show_output: false
+  interpreters:
+    script: "/bin/bash"
 
-# Define reusable script functions
+# Define reusable script functions (keyed by interpreter)
 functions:
-  - name: my_shared_func
-    interpreters: [sh, bash, zsh]
-    script: |
-      echo "This is a shared utility"
+  bash:
+    - name: my_shared_func
+      source: |
+        my_shared_func() { echo "This is a shared utility"; }
+  zsh:
+    - name: my_shared_func
+      source: |
+        my_shared_func() { echo "This is a shared utility"; }
 
 # Global script variables mapped to environment
 vars:

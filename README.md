@@ -8,7 +8,7 @@
 - [Usage](#usage)
 - [Manifest Syntax](#manifest-syntax)
   - [Outcomes & Exit Codes](#outcomes--exit-codes)
-  - [Raw Variables](#raw-variables)
+  - [Shell Command Substitution in Variables](#shell-command-substitution-in-variables)
   - [Conditions](#conditions)
   - [Include Blocks](#include-blocks)
 - [Validation Summary](#validation-summary)
@@ -23,8 +23,9 @@
 - **Cross-Platform Compatibility:** Automatically detects default shell interpreters (bash/zsh vs PowerShell).
 - **Reusable Functions:** Define `functions` natively in the manifest to embed shared code across multiple validation blocks, reducing duplicate logic.
 - **Outcome-Based Results:** Define `pass`, `fail`, and `warn` outcomes with optional `exit_codes` lists for fine-grained result determination.
-- **Raw Variables:** Use the `raw:` variable type to bypass automatic quoting and enable shell command substitution.
+- **Shell Command Substitution:** Variables are double-quoted in the generated script, so `$(...)` expressions are naturally evaluated at runtime.
 - **Conditional Execution:** Gate validation execution with `conditions` using Go-like boolean expressions powered by [expr](https://github.com/expr-lang/expr).
+- **Inspection Tools:** Use `--list` to enumerate all validations with IDs, or `--show` to view the fully rendered script for a specific validation without executing.
 - **Manifest Includes:** Compose manifests by including other YAML files with variable passthrough and optional tag propagation.
 - **Validation Summary:** Displays a summary table of all Pass/Fail/Warn/Skip results at the end of execution.
 
@@ -73,15 +74,20 @@ templateVars:
 
 # Global default interpreter and settings
 defaults:
-  interpreter: "/bin/bash"
   show_output: false
+  interpreters:
+    script: "/bin/bash"
 
-# Define reusable script functions
+# Define reusable script functions (keyed by interpreter)
 functions:
-  - name: my_shared_func
-    interpreters: [sh, bash, zsh]
-    script: |
-      echo "This is a shared utility"
+  bash:
+    - name: my_shared_func
+      source: |
+        my_shared_func() { echo "This is a shared utility"; }
+  zsh:
+    - name: my_shared_func
+      source: |
+        my_shared_func() { echo "This is a shared utility"; }
 
 # Global script variables mapped to environment
 vars:
@@ -142,17 +148,16 @@ outcomes:
     message: "File is missing"
 ```
 
-### Raw Variables
+### Shell Command Substitution in Variables
 
-By default, string variables are automatically quoted when passed to shell scripts. To allow shell expansion (e.g., command substitution), use the `raw:` variable type:
+String variables are emitted inside double quotes in the generated shell header (e.g., `MY_VAR="value"`). Because bash/zsh evaluate `$(...)` within double quotes, command substitution works naturally:
 
 ```yaml
 vars:
-  my_computed_var:
-    raw: "$(echo hello world)"
+  my_computed_var: "$(hostname -s)"
 ```
 
-Raw variables bypass automatic quoting, so the shell evaluates `$(echo hello world)` at runtime instead of treating it as a literal string.
+At runtime, the shell evaluates `$(hostname -s)` and assigns the result to `my_computed_var`.
 
 This also works inside include blocks:
 
@@ -163,6 +168,8 @@ includes:
     vars:
       myvar: "$(echo MyyyyyVarrrrr)"
 ```
+
+> **Note:** Numeric literals are emitted unquoted for bash arithmetic compatibility.
 
 ### Conditions
 
@@ -266,13 +273,15 @@ validator --manifest manifest.yaml --no-summary
 
 | Flag | Alias | Description |
 |---|---|---|
-| `--manifest` | | Path to the YAML manifest file or remote HTTPS URL. |
+| `--manifest` | | Path to the YAML manifest file, remote HTTPS URL, or `-` for stdin. |
 | `--extra-var` | `-e` | Specify extra variables for the config template as `key=value` pairs. Supports nested JSON string values. Can be specified multiple times. |
 | `--name` | `-n` | Regex pattern to filter validations by sequence name. |
 | `--tag` | `-t` | Filter validations by tag assignment. Can be specified multiple times. |
 | `--log-level` | | Set the Log level: `DEBUG`, `INFO`, `WARN`, `ERROR` (Default: `INFO`). |
 | `--show-output` | | Force outputting raw child STDOUT/STDERR for all validations. |
 | `--dump-script` | | Check templating definitions and dump the resulting scripts to the console without executing them. |
+| `--list` | | List all validations with their Execution Number and Validation ID, then exit without running. |
+| `--show` | | Show rendered script for validations matching the given Validation ID or name pattern, then exit. |
 | `--ansi-vars` | | Expose built-in ANSI color variables (e.g. `$red`, `$bold_green`) to nested shell scripts. Enabled by default. |
 | `--color` | | Define global output color engine: `auto` (default), `always`, or `never`. |
 | `--strict` | | Fail processing immediately if duplicate keys are populated within the manifest template constraints. |
