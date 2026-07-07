@@ -35,6 +35,7 @@ Contains the CLI entry point (`main()`), all manifest/YAML parsing logic, interp
     *   `ShowOutput` / `ShowOutputSet` — Default output streaming behavior.
 *   **`functionDef`** — A single reusable function (`name` + `source`).
 *   **`functionsMap`** — `map[string][]functionDef` keyed by interpreter base name (e.g., `bash`, `zsh`, `powershell`).
+*   **`loopItem`** — A single loop iteration: `Name` (string), `Vars` (map), `Tags` ([]string).
 *   **`includeBlock`** — Represents one `includes` entry: `Name`, `Path`, `Vars` (map), `PropagateTags` (bool).
 *   **`outcome`** — A result outcome with `Message` (string) and `ExitCodes` ([]int).
 *   **`condition`** — A single condition with an `Eval` expression string.
@@ -47,6 +48,7 @@ Contains the CLI entry point (`main()`), all manifest/YAML parsing logic, interp
     *   `LocalVarsOrdered` / `LocalVarsMap` — Scoped variables.
     *   `EnvOnly` / `EnvOnlySet`, `ShowOutput` / `ShowOutputSet` — Per-validation overrides.
     *   `Includes` — Nested manifest includes.
+    *   `Loop` — Loop iteration items for repeated execution.
 *   **`runResult`** — Captured process output: `Stdout`, `Stderr`, `ExitCode`, `Duration`.
 
 #### Core Functions
@@ -111,10 +113,10 @@ Contains the recursive execution engine and supporting logic that orchestrates v
         1. Loads and templates the manifest.
         2. Parses into structs.
         3. Iterates validations, applying name/tag/condition filters.
-        4. Prepends function bodies matching the active interpreter.
-        5. Builds the variable header and renders script templates.
+        4. Builds iteration list from `loop` (or single pass if no loop).
+        5. For each iteration: merges loop vars, prepends function bodies, builds header, renders script.
         6. Executes (buffered or live) and evaluates outcomes against exit codes.
-        7. Recursively processes `includes` with child `runContext` (respecting `propagate_tags`).
+        7. Recursively processes `includes` with child `runContext`. Builds `incVars` for the child by layering: parent global vars → inherited `includeVars` → explicit `include.vars` → loop `vars`. These are passed as both template context (`templateVars`) and shell variables (`includeVarsOrdered` in the merge chain).
     *   Returns `0` if all validations pass, `1` if any fail.
 
 2.  **`evaluateConditions(conditions []condition, ctx *runContext) (bool, error)`**
@@ -126,9 +128,18 @@ Contains the recursive execution engine and supporting logic that orchestrates v
     *   All conditions must be `true` (AND logic) for the validation to proceed.
 
 3.  **`listManifestValidations(manifestPath string, includeVars map[string]any, depth int)`**
-    *   Recursively lists all validations (with IDs, tags, condition counts) without executing them. Used by `--list`.
+    *   Recursively lists all validations (with IDs, tags, condition counts, loop counts) without executing them. Used by `--list`.
 
-4.  **`matchesShowFilter(filter, validationID, name string) bool`**
+4.  **`parseTagFilter(filter string) (baseTag, loopTag string)`**
+    *   Splits a tag filter at `@` into the validation-level base tag and an optional loop-level tag qualifier.
+
+5.  **`matchValidationTags(validationTags, filterTags []string) (bool, []string)`**
+    *   Checks if a validation's tags match any filter tags, returning matched loop-level qualifiers.
+
+6.  **`shouldRunLoopItem(item loopItem, loopFilters []string) bool`**
+    *   Determines whether a specific loop iteration should execute given active loop tag filters.
+
+7.  **`matchesShowFilter(filter, validationID, name string) bool`**
     *   Matches a `--show` filter against validation ID or name (case-insensitive substring or regex).
 
 ### `console_posix.go` / `console_windows.go`
@@ -160,14 +171,20 @@ Platform-specific terminal initialization via build tags.
 │ 5. Validation Loop (executeManifest)                        │
 │    For each validation:                                     │
 │    a. Apply name regex filter                               │
-│    b. Apply tag filter                                      │
+│    b. Apply tag filter (parse tag@loop syntax)              │
 │    c. Evaluate conditions (skip if any false)               │
-│    d. Prepend matching function bodies by interpreter       │
-│    e. Build variable header (MANIFEST_DIR + ANSI + vars)    │
-│    f. Render script body through templates                  │
-│    g. Execute via temp file (buffered or live-stream)       │
-│    h. Determine outcome (WARN → PASS → FAIL → default)     │
-│    i. Process includes recursively                          │
+│    d. Build iteration list from loop[] (filter by loop tag) │
+│    e. For each iteration:                                   │
+│       - Merge loop vars into local vars                     │
+│       - Inject LOOP_NAME + LOOP_INDEX                       │
+│       - Prepend matching function bodies by interpreter     │
+│       - Build variable header                                │
+│         (MANIFEST_DIR + ANSI + includeVars + global + local) │
+│       - Render script body through templates                │
+│       - Execute via temp file (buffered or live-stream)     │
+│       - Determine outcome (WARN → PASS → FAIL → default)   │
+│       - Process includes recursively                        │
+│         (parent vars + include vars + loop vars propagated)  │
 ├─────────────────────────────────────────────────────────────┤
 │ 6. Summary & Exit                                           │
 │    Print summary table (unless --no-summary)                │
@@ -187,14 +204,27 @@ Platform-specific terminal initialization via build tags.
 
 ## Variable Precedence
 
-When building the template context, values are layered lowest-to-highest precedence:
+### Template Context (first-pass rendering)
+
+When building the Go template context for first-pass YAML rendering, values are layered lowest-to-highest precedence:
 
 1. **OS environment** (lowest)
 2. **`templateVars`** from manifest
-3. **`--extra-var` overrides**
-4. **Merged shell vars** (`vars:` global + per-validation) (highest)
+3. **`includeVars`** (parent global vars + explicit include vars + loop vars, merged into `templateVars`)
+4. **`--extra-var` overrides** (highest)
 
 The `.Env` key always provides access to the raw OS environment regardless of overrides.
+
+### Shell Variables (script header)
+
+When building the shell variable header for script execution, values are layered lowest-to-highest precedence:
+
+1. **Built-in base vars** — `MANIFEST_DIR`, ANSI color vars (if enabled), `LOOP_NAME`/`LOOP_INDEX` (if in a loop) (lowest)
+2. **`includeVars`** — propagated from parent manifest's `vars:` + inherited grandparent vars + explicit `include.vars` + loop `vars`
+3. **Global `vars:`** — the current manifest's own `vars:` block
+4. **Local/loop vars** — per-validation `vars:` + loop iteration `vars:` (highest)
+
+This means a parent manifest's `vars:` are automatically available as shell variables (`$var`) in child manifests without needing explicit `include.vars` passthrough. Child manifests can override any inherited variable by declaring it in their own `vars:` block.
 
 ## Validation ID Generation
 

@@ -12,7 +12,11 @@ validations:
     show_output: true
     tags:
       - gabbledegonk
-    script: echo "Inclusion works!! myvar is {{ .myvar }}"
+    script: echo "Inclusion works!! myvar is $global_var"
+    loop:
+      - name: "Child loop 1"
+      - name: "Child loop 2"
+      - name: "Child loop 3"
   - name: "Included Validation 2"
     show_output: true
     tags:

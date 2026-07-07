@@ -11,7 +11,10 @@
   - [Shell Command Substitution in Variables](#shell-command-substitution-in-variables)
   - [Conditions](#conditions)
   - [Include Blocks](#include-blocks)
+  - [Loop Iterations](#loop-iterations)
+- [Variable Scopes: `templateVars` vs `vars`](#variable-scopes-templatevars-vs-vars)
 - [Validation Summary](#validation-summary)
+  - [Exec Numbering Conventions](#exec-numbering-conventions)
 - [Command Line Flags](#command-line-flags)
 - [Architecture & Walkthrough](#architecture--walkthrough)
 
@@ -26,6 +29,7 @@
 - **Shell Command Substitution:** Variables are double-quoted in the generated script, so `$(...)` expressions are naturally evaluated at runtime.
 - **Conditional Execution:** Gate validation execution with `conditions` using Go-like boolean expressions powered by [expr](https://github.com/expr-lang/expr).
 - **Inspection Tools:** Use `--list` to enumerate all validations with IDs, or `--show` to view the fully rendered script for a specific validation without executing.
+- **Loop Iterations:** Execute a validation multiple times with per-iteration variable overrides and loop-level tag filtering (`-t tag@loop_tag`).
 - **Manifest Includes:** Compose manifests by including other YAML files with variable passthrough and optional tag propagation.
 - **Validation Summary:** Displays a summary table of all Pass/Fail/Warn/Skip results at the end of execution.
 
@@ -249,19 +253,249 @@ validations:
 | `vars` | Variables to pass into the included manifest's `templateVars`. |
 | `propagate_tags` | If `true` (default), the parent's tag filter is applied to the included manifest's validations. Set to `false` to run all validations in the include regardless of tag filters. |
 
+#### Parent Variable Propagation
+
+The parent manifest's `vars:` block is automatically propagated to child manifests. Child scripts can reference parent variables using shell syntax (`$var`) without the parent needing to explicitly pass them via `include.vars`:
+
+```yaml
+# parent-manifest.yaml
+vars:
+  global_var: 123
+
+validations:
+  - name: "From other"
+    includes:
+      - name: other
+        path: child-manifest.yaml
+```
+
+```yaml
+# child-manifest.yaml
+validations:
+  - name: "Child Validation"
+    script: echo "parent global_var is $global_var"   # outputs: 123
+```
+
+The precedence order for shell variables in child manifests (lowest → highest):
+1. **Built-in vars** — `MANIFEST_DIR`, ANSI vars, `LOOP_NAME`/`LOOP_INDEX`
+2. **Parent vars** — parent's `vars:` block + any vars inherited from grandparent includes
+3. **Include vars** — explicit `include.vars` + loop `vars` from the parent
+4. **Child global vars** — the child manifest's own `vars:` block
+5. **Child local/loop vars** — per-validation and per-loop-iteration vars in the child
+
+### Loop Iterations
+
+Validations can be executed multiple times using the `loop` key. Each loop item can define its own `name`, `vars`, and `tags`:
+
+```yaml
+validations:
+  - name: "SkipMe"
+    tags: ["other"]
+    script: echo "Running $LOOP_NAME with myvar=$myvar"
+    show_output: true
+    loop:
+      - name: "Loop 1"
+        vars:
+          myvar: var_from_loop_1
+        tags:
+          - loop1
+      - name: "Loop 2"
+        tags:
+          - loop2
+```
+
+| Field | Description |
+|---|---|
+| `name` | Display name for the iteration (shown in output as `ValidationName [LoopName]`). If omitted, defaults to `loop N`. |
+| `vars` | Variables that override the validation's local `vars` for this iteration. Also override include `vars` when used with includes. |
+| `tags` | Loop-level tags used for selective iteration filtering with the `tag@loop_tag` syntax. |
+
+#### Loop Tag Filtering
+
+Use the `@` separator in `-t` to target specific loop iterations:
+
+```bash
+# Run ALL iterations of validations tagged "other"
+validator --manifest manifest.yaml -t other
+
+# Run ONLY iterations tagged "loop1" within validations tagged "other"
+validator --manifest manifest.yaml -t other@loop1
+```
+
+#### Built-in Loop Variables
+
+When inside a loop, two extra shell variables are injected:
+
+| Variable | Description |
+|---|---|
+| `LOOP_NAME` | The `name` of the current loop item. |
+| `LOOP_INDEX` | The 0-based index of the current iteration. |
+
+#### Loop with Includes
+
+Loops work with includes — each iteration re-executes the included manifest with the loop's vars merged on top of the include's vars:
+
+```yaml
+validations:
+  - name: "From other"
+    includes:
+      - name: other
+        path: other-manifest.yaml
+        vars:
+          myvar: "$(echo DefaultVar)"
+        propagate_tags: false
+    tags:
+      - gabbledegak
+    loop:
+      - name: "Loop 1"
+        vars:
+          myvar: "$(echo OverrideVar1)"
+      - name: "Loop 2"
+        vars:
+          myvar: "$(echo OverrideVar2)"
+```
+
+In this example, the included manifest runs twice — once with `myvar` set to the result of `$(echo OverrideVar1)` and once with `$(echo OverrideVar2)`.
+
+## Variable Scopes: `templateVars` vs `vars`
+
+The manifest has two distinct variable systems. Understanding the difference is important when composing manifests with includes and loops.
+
+| Section | Available as | Resolved during | Syntax in scripts |
+|---|---|---|---|
+| `templateVars:` | Go template context | First-pass YAML rendering (before parsing) | `{{ .myvar }}` |
+| `vars:` (global or per-validation) | Shell variables | After parsing, injected into the script header | `$myvar` |
+
+### How it works
+
+1. **First pass** — The entire YAML file is rendered as a Go template. The context includes `templateVars`, variables passed via `include.vars` / loop `vars`, parent `vars:` (propagated automatically), environment variables, and `--extra-var` overrides.
+2. **Second pass** — After the rendered YAML is parsed, each validation's script is rendered again with the full merged variable set (`vars` + local vars + loop vars + parent vars).
+
+Because `{{ .myvar }}` expressions are consumed during the **first pass**, only values present in `templateVars` or passed via `includeVars` are available at that stage. The `vars:` block is parsed *after* the first pass and is only available as shell variables (`$myvar`) or during the second-pass template rendering.
+
+### Practical implications
+
+**Using `templateVars` for template defaults in included manifests:**
+
+```yaml
+# child-manifest.yaml
+templateVars:
+  myvar: "default_value"    # available as {{ .myvar }} during first-pass rendering
+
+vars:
+  myvar: '{{ .myvar }}'      # captures the resolved template value into a shell variable
+
+validations:
+  - name: "Example"
+    script: echo "template={{ .myvar }} shell=$myvar"
+```
+
+When the parent passes `myvar` via `include.vars` or loop `vars`, it overrides the child's `templateVars` default. If the parent does NOT pass `myvar`, the child's `templateVars` default is used.
+
+**Common pitfall — using `vars` alone for template expressions:**
+
+```yaml
+# child-manifest.yaml
+vars:
+  myvar: "some_value"       # NOT available as {{ .myvar }} during first-pass rendering
+
+validations:
+  - name: "Example"
+    script: echo "{{ .myvar }}"   # ⚠ resolves to <no value>
+```
+
+Since `vars:` is parsed after the first-pass rendering, `{{ .myvar }}` in the script is evaluated before `myvar` exists in the template context. Use `$myvar` (shell syntax) instead, or move the default to `templateVars:`.
+
 ## Validation Summary
 
 After all validations complete, a summary table is printed showing the result of each validation:
 
 ```
 --- Validation Summary ---
-✅ Check File Exists              [PASS]
-⚠️ Check Config                   [WARN]
-❌ Check Service                   [FAIL]
-⏭️  RunMyConditionalTag            [SKIP]
+✅ Validation #1    [a1b2c3d4] Check File Exists              [PASS]
+⚠️ Validation #2    [e5f6a7b8] Check Config                   [WARN]
+❌ Validation #3    [c9d0e1f2] Check Service                   [FAIL]
+⏭️  Validation #4    [a3b4c5d6] RunMyConditionalTag            [SKIP]
 
 Total: 4 (Pass: 1, Fail: 1, Warn: 1, Skip: 1)
 ```
+
+Each line shows:
+- **Status icon** — ✅ PASS, ⚠️ WARN, ❌ FAIL, or ⏭️ SKIP.
+- **Exec number** — `#N` identifies the validation's position, with dot-levels for includes and `@LoopName` for loop iterations (see below).
+- **Validation ID** — A deterministic FNV-32a hash in brackets.
+- **Name** — The validation name, with `[LoopName]` suffix for loop iterations.
+- **Result** — The outcome label.
+
+### Exec Numbering Conventions
+
+The exec number encodes the nesting hierarchy so you can trace exactly which validation ran and under which loop iteration.
+
+#### Format
+
+```
+#<parent>[.child[.grandchild...]][@LoopName]
+```
+
+- **Dot levels** (`.`) represent include nesting depth. `#1.2` means parent validation 1, child validation 2.
+- **`@LoopName`** identifies the loop iteration. It appears on the segment that has a loop — the current validation or a parent that iterated over includes.
+
+#### Examples by scenario
+
+**No loops, no includes** — simple sequential numbering:
+
+```
+✅ Validation #1    [a1b2c3d4] Check File Exists    [PASS]
+✅ Validation #2    [e5f6a7b8] Check Config          [PASS]
+```
+
+**Includes, no loops** — dot-separated parent/child:
+
+```
+✅ Validation #1.1  [a1b2c3d4] Included Validation   [PASS]
+✅ Validation #1.2  [e5f6a7b8] Included Validation 2 [PASS]
+```
+
+Here `#1.1` = parent validation 1 → child validation 1.
+
+**Loops on a parent with includes (child has no loop)** — parent loop name appears in the prefix:
+
+```
+✅ Validation #1@Loop 1.1 [a1b2c3d4] Included Validation   [PASS]
+✅ Validation #1@Loop 1.2 [e5f6a7b8] Included Validation 2 [PASS]
+✅ Validation #1@Loop 2.1 [a1b2c3d4] Included Validation   [PASS]
+✅ Validation #1@Loop 2.2 [e5f6a7b8] Included Validation 2 [PASS]
+```
+
+`#1@Loop 1.1` = parent validation 1, parent loop "Loop 1", child validation 1.
+
+**Loops on a standalone validation (no includes):**
+
+```
+✅ Validation #3@Loop 1 [c9d0e1f2] SkipMe [Loop 1]   [PASS]
+✅ Validation #3@Loop 2 [c9d0e1f2] SkipMe [Loop 2]   [PASS]
+```
+
+`#3@Loop 1` = validation 3, loop iteration "Loop 1". The validation name also shows `[Loop 1]` as a suffix.
+
+**Loops on both parent and child** — each `@` refers to its own level:
+
+```
+✅ Validation #1@Loop 1.1@Child loop 1 [a1b2c3d4] Included Validation [Child loop 1] [PASS]
+✅ Validation #1@Loop 1.1@Child loop 2 [a1b2c3d4] Included Validation [Child loop 2] [PASS]
+✅ Validation #1@Loop 1.2              [e5f6a7b8] Included Validation 2              [PASS]
+✅ Validation #1@Loop 2.1@Child loop 1 [a1b2c3d4] Included Validation [Child loop 1] [PASS]
+✅ Validation #1@Loop 2.1@Child loop 2 [a1b2c3d4] Included Validation [Child loop 2] [PASS]
+✅ Validation #1@Loop 2.2              [e5f6a7b8] Included Validation 2              [PASS]
+```
+
+Reading `#1@Loop 1.1@Child loop 2`:
+- `1` — parent validation number
+- `@Loop 1` — parent loop iteration name
+- `.1` — child validation number within the include
+- `@Child loop 2` — child's own loop iteration name
+
+Non-looped children (like `#1@Loop 1.2`) have no trailing `@`.
 
 To suppress the summary, use the `--no-summary` flag:
 

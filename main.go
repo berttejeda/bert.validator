@@ -29,7 +29,7 @@ import (
    ========================= */
 
 var (
-	Version   = "0.9.0"
+	Version   = "1.0.0"
 	GitCommit = "dev"
 	BuildDate = "2026-05-11"
 )
@@ -601,6 +601,12 @@ type includeBlock struct {
 	PropagateTags bool
 }
 
+type loopItem struct {
+	Name string
+	Vars map[string]any
+	Tags []string
+}
+
 type outcome struct {
 	Message   string `yaml:"message"`
 	ExitCodes []int  `yaml:"exit_codes"`
@@ -629,6 +635,7 @@ type validation struct {
 	ShowOutput       bool // per-validation override of --show-output
 	ShowOutputSet    bool
 	Includes         []includeBlock
+	Loop             []loopItem
 }
 
 func computeValidationID(execNumber int, name string) string {
@@ -968,6 +975,35 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			}
 		}
 
+		var loop []loopItem
+		if loopNode := getMapValue(body, "loop"); loopNode != nil && loopNode.Kind == yaml.SequenceNode {
+			for _, n := range loopNode.Content {
+				if n.Kind == yaml.MappingNode {
+					li := loopItem{Vars: make(map[string]any)}
+					if nameNode := getMapValue(n, "name"); nameNode != nil {
+						li.Name = toString(nameNode)
+					}
+					if varsNode := getMapValue(n, "vars"); varsNode != nil && varsNode.Kind == yaml.MappingNode {
+						for i := 0; i < len(varsNode.Content); i += 2 {
+							k := varsNode.Content[i].Value
+							var vAny any
+							if err := varsNode.Content[i+1].Decode(&vAny); err == nil {
+								li.Vars[k] = vAny
+							} else {
+								li.Vars[k] = toString(varsNode.Content[i+1])
+							}
+						}
+					}
+					if tagsNode := getMapValue(n, "tags"); tagsNode != nil && tagsNode.Kind == yaml.SequenceNode {
+						for _, tn := range tagsNode.Content {
+							li.Tags = append(li.Tags, toString(tn))
+						}
+					}
+					loop = append(loop, li)
+				}
+			}
+		}
+
 		var localOrdered []kv
 		if lv := getMapValue(body, "vars"); lv != nil {
 			lo, err2 := orderedVars(lv, fmt.Sprintf("validation %q", name))
@@ -1003,6 +1039,7 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			ShowOutput:       showOutputVal,
 			ShowOutputSet:    showOutputSet,
 			Includes:         includes,
+			Loop:             loop,
 		})
 	}
 

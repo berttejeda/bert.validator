@@ -30,11 +30,13 @@ validations:
     includes:
       - name: other
         path: other-manifest.yaml
-        vars:
-          myvar: "$(echo MyyyyyVarrrrr)"
         propagate_tags: false
     tags:
       - gabbledegak
+    loop:
+      - name: "Loop 1"
+      - name: "Loop 2"
+      - name: "Loop 3"
   - name: "Check File Exists"
     tags:
       - "system"
@@ -63,8 +65,17 @@ validations:
 
   - name: "SkipMe"
     tags: ["other"]
-    script: echo "Running SkipMe"
+    script: echo "Running SkipMe - $global_var"
     show_output: true
+    loop:
+      - name: "Loop 1"
+        vars:
+          myvar: var_from_loop_1
+        tags:
+          - loop1
+      - name: "Loop 2"
+        tags:
+          - loop2
 
   - name: "RunAlso"
     tags: ["run"]
