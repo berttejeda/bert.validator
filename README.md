@@ -12,6 +12,7 @@
   - [Conditions](#conditions)
   - [Include Blocks](#include-blocks)
   - [Loop Iterations](#loop-iterations)
+  - [Validation Notes](#validation-notes)
 - [Variable Scopes: `templateVars` vs `vars`](#variable-scopes-templatevars-vs-vars)
 - [Validation Summary](#validation-summary)
   - [Exec Numbering Conventions](#exec-numbering-conventions)
@@ -31,6 +32,7 @@
 - **Inspection Tools:** Use `--list` to enumerate all validations with IDs, or `--show` to view the fully rendered script for a specific validation without executing.
 - **Loop Iterations:** Execute a validation multiple times with per-iteration variable overrides and loop-level tag filtering (`-t tag@loop_tag`).
 - **Manifest Includes:** Compose manifests by including other YAML files with variable passthrough and optional tag propagation.
+- **Validation Notes:** Attach free-form notes to any validation; notes are rendered with the same template engine and displayed under the validation's summary line.
 - **Validation Summary:** Displays a summary table of all Pass/Fail/Warn/Skip results at the end of execution.
 
 ## Installation
@@ -356,6 +358,34 @@ validations:
 ```
 
 In this example, the included manifest runs twice — once with `myvar` set to the result of `$(echo OverrideVar1)` and once with `$(echo OverrideVar2)`.
+
+### Validation Notes
+
+Validations can include a `notes` list. Each note is rendered with the same Go template context as the validation script (`templateVars`, shell `vars`, loop variables, environment variables, and `--extra-var` overrides) and is printed under the validation's summary line.
+
+```yaml
+validations:
+  - name: "Check File Exists"
+    notes:
+      - "Checked file, my app name is {{ .app_name }}"
+    tags:
+      - "system"
+      - "core"
+    script: |
+      if [ -f "/etc/hosts" ]; then
+        exit 0
+      fi
+```
+
+This produces:
+
+```text
+✅ Validation #2    [280dd229] Check File Exists              [PASS]
+   Notes:
+   - Checked file, my app name is MyApp
+```
+
+> **Caveat:** A validation that only includes other manifests and does not itself produce a summary result will not display its notes. Place `notes` on validations that execute their own scripts (or on the child validations inside the included manifests) so the notes appear in the summary.
 
 ## Variable Scopes: `templateVars` vs `vars`
 

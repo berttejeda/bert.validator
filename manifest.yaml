@@ -38,6 +38,8 @@ validations:
       - name: "Loop 2"
       - name: "Loop 3"
   - name: "Check File Exists"
+    notes:
+      - Checked file, my app name is {{ .app_name }}    
     tags:
       - "system"
       - "core"

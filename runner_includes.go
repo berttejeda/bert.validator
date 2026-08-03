@@ -21,6 +21,7 @@ type summaryResult struct {
 	ValidationID string
 	Name         string
 	Status       string // PASS, FAIL, WARN, SKIP
+	Notes        []string
 }
 
 type runContext struct {
@@ -101,10 +102,10 @@ func shouldRunLoopItem(item loopItem, loopFilters []string) bool {
 	return false
 }
 
-func (ctx *runContext) addResult(execDisplay, validationID, name, status string) {
+func (ctx *runContext) addResult(execDisplay, validationID, name, status string, notes []string) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
-	ctx.Results = append(ctx.Results, summaryResult{ExecDisplay: execDisplay, ValidationID: validationID, Name: name, Status: status})
+	ctx.Results = append(ctx.Results, summaryResult{ExecDisplay: execDisplay, ValidationID: validationID, Name: name, Status: status, Notes: notes})
 }
 
 func evaluateConditions(conditions []condition, ctx *runContext) (bool, error) {
@@ -332,7 +333,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 				if !dumpScript && ctx.ShowFilter == "" {
 					logAt(ERROR, "⚠ Condition error for '#%s %s %s': %v", execDisp, v.ValidationID, v.Name, err)
 					overallRC = 1
-					ctx.addResult(execDisp, v.ValidationID, v.Name, "FAIL")
+					ctx.addResult(execDisp, v.ValidationID, v.Name, "FAIL", nil)
 					fmt.Println()
 				} else if dumpScript {
 					fmt.Printf("\n# --- [%s] SKIPPED (condition error: %v) ---\n", v.Name, err)
@@ -343,7 +344,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 				if !dumpScript && ctx.ShowFilter == "" {
 					execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
 					logAt(INFO, "⏭️  Skipped '#%s %s %s': condition not met", execDisp, v.ValidationID, v.Name)
-					ctx.addResult(execDisp, v.ValidationID, v.Name, "SKIP")
+					ctx.addResult(execDisp, v.ValidationID, v.Name, "SKIP", nil)
 					fmt.Println()
 				} else if dumpScript {
 					fmt.Printf("\n# --- [%s] SKIPPED (condition not met) ---\n", v.Name)
@@ -581,6 +582,19 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					}
 				}
 
+				// Render per-validation notes using the same template context.
+				var renderedNotes []string
+				for i, note := range v.Notes {
+					if strings.TrimSpace(note) == "" {
+						continue
+					}
+					if t, err := renderTemplate(fmt.Sprintf("%s_note_%d", iterName, i), note, tmplCtx); err == nil {
+						renderedNotes = append(renderedNotes, t)
+					} else {
+						logAt(ERROR, "[%s] Template error in note: %v", iterName, err)
+					}
+				}
+
 				finalScript := iterScript
 				if !envOnly {
 					switch kind {
@@ -685,21 +699,21 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 
 					if len(v.Warn.ExitCodes) > 0 && matchCode(res.ExitCode, v.Warn.ExitCodes) {
 						logAt(WARN, "⚠️ Validation '#%s %s %s' WARNING: %s", iterExecDisp, v.ValidationID, iterName, renderedWarnMsg)
-						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "WARN")
+						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "WARN", renderedNotes)
 					} else if len(v.Pass.ExitCodes) > 0 && matchCode(res.ExitCode, v.Pass.ExitCodes) {
 						logAt(INFO, "✅ Validation '#%s %s %s' PASSED: %s", iterExecDisp, v.ValidationID, iterName, renderedPassMsg)
-						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "PASS")
+						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "PASS", renderedNotes)
 					} else if len(v.Fail.ExitCodes) > 0 && matchCode(res.ExitCode, v.Fail.ExitCodes) {
 						logAt(ERROR, "❌ Validation '#%s %s %s' FAILED: %s", iterExecDisp, v.ValidationID, iterName, renderedFailMsg)
 						overallRC = 1
-						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "FAIL")
+						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "FAIL", renderedNotes)
 					} else if res.ExitCode == 0 {
 						logAt(INFO, "✅ Validation '#%s %s %s' PASSED: %s", iterExecDisp, v.ValidationID, iterName, renderedPassMsg)
-						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "PASS")
+						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "PASS", renderedNotes)
 					} else {
 						logAt(ERROR, "❌ Validation '#%s %s %s' FAILED: %s", iterExecDisp, v.ValidationID, iterName, renderedFailMsg)
 						overallRC = 1
-						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "FAIL")
+						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "FAIL", renderedNotes)
 					}
 				}
 			}

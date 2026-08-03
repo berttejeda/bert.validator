@@ -29,7 +29,7 @@ import (
    ========================= */
 
 var (
-	Version   = "1.0.0"
+	Version   = "1.1.0"
 	GitCommit = "dev"
 	BuildDate = "2026-05-11"
 )
@@ -636,6 +636,7 @@ type validation struct {
 	ShowOutputSet    bool
 	Includes         []includeBlock
 	Loop             []loopItem
+	Notes            []string
 }
 
 func computeValidationID(execNumber int, name string) string {
@@ -932,6 +933,13 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			}
 		}
 
+		var notes []string
+		if nNode := getMapValue(body, "notes"); nNode != nil && nNode.Kind == yaml.SequenceNode {
+			for _, n := range nNode.Content {
+				notes = append(notes, toString(n))
+			}
+		}
+
 		var conditions []condition
 		if cNode := getMapValue(body, "conditions"); cNode != nil && cNode.Kind == yaml.SequenceNode {
 			for _, n := range cNode.Content {
@@ -1040,6 +1048,7 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			ShowOutputSet:    showOutputSet,
 			Includes:         includes,
 			Loop:             loop,
+			Notes:            notes,
 		})
 	}
 
@@ -1510,6 +1519,12 @@ func main() {
 				skipCount++
 			}
 			fmt.Printf("%s Validation #%-4s [%s] %-30s [%s]\n", icon, res.ExecDisplay, res.ValidationID, res.Name, res.Status)
+			if len(res.Notes) > 0 {
+				fmt.Println("   Notes:")
+				for _, note := range res.Notes {
+					fmt.Printf("   - %s\n", note)
+				}
+			}
 		}
 		fmt.Printf("\nTotal: %d (Pass: %d, Fail: %d, Warn: %d, Skip: %d)\n", len(ctx.Results), passCount, failCount, warnCount, skipCount)
 	}
