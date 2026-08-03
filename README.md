@@ -385,6 +385,35 @@ This produces:
    - Checked file, my app name is MyApp
 ```
 
+Loop items can also define their own `notes` list. When a loop item has notes, those override the top-level notes for that iteration. If a validation has no top-level `notes` and only one loop item defines notes, only that iteration displays a note.
+
+```yaml
+validations:
+  - name: "Check File Exists"
+    notes:
+      - "Checked file, my app name is {{ .app_name }}"
+    script: |
+      if [ -f "/etc/hosts" ]; then
+        exit 0
+      fi
+    loop:
+      - name: "Loop 1"
+        notes:
+          - "Checked file for Loop 1, my app name is {{ .app_name }}"
+      - name: "Loop 2"
+      - name: "Loop 3"
+```
+
+This produces for `Loop 1`:
+
+```text
+✅ Validation #2@Loop 1 [280dd229] Check File Exists [Loop 1] [PASS]
+   Notes:
+   - Checked file for Loop 1, my app name is MyApp
+```
+
+and for `Loop 2` and `Loop 3` the top-level note is used.
+
 > **Caveat:** A validation that only includes other manifests and does not itself produce a summary result will not display its notes. Place `notes` on validations that execute their own scripts (or on the child validations inside the included manifests) so the notes appear in the summary.
 
 ## Variable Scopes: `templateVars` vs `vars`

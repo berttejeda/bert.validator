@@ -29,7 +29,7 @@ import (
    ========================= */
 
 var (
-	Version   = "1.1.0"
+	Version   = "1.1.1"
 	GitCommit = "dev"
 	BuildDate = "2026-05-11"
 )
@@ -602,9 +602,10 @@ type includeBlock struct {
 }
 
 type loopItem struct {
-	Name string
-	Vars map[string]any
-	Tags []string
+	Name  string
+	Vars  map[string]any
+	Tags  []string
+	Notes []string
 }
 
 type outcome struct {
@@ -1007,6 +1008,12 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 							li.Tags = append(li.Tags, toString(tn))
 						}
 					}
+					if notesNode := getMapValue(n, "notes"); notesNode != nil && notesNode.Kind == yaml.SequenceNode {
+						for _, nn := range notesNode.Content {
+							li.Notes = append(li.Notes, toString(nn))
+						}
+					}
+
 					loop = append(loop, li)
 				}
 			}

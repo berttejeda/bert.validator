@@ -582,9 +582,15 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					}
 				}
 
-				// Render per-validation notes using the same template context.
+				// Render notes for this iteration. Loop-level notes override top-level notes.
+				var notesToRender []string
+				if iter.item != nil && len(iter.item.Notes) > 0 {
+					notesToRender = iter.item.Notes
+				} else {
+					notesToRender = v.Notes
+				}
 				var renderedNotes []string
-				for i, note := range v.Notes {
+				for i, note := range notesToRender {
 					if strings.TrimSpace(note) == "" {
 						continue
 					}

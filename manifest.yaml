@@ -39,7 +39,7 @@ validations:
       - name: "Loop 3"
   - name: "Check File Exists"
     notes:
-      - Checked file, my app name is {{ .app_name }}    
+      - Checked file, my app name is {{ .app_name }}
     tags:
       - "system"
       - "core"
@@ -53,6 +53,12 @@ validations:
       else
         exit 1
       fi
+    loop:
+      - name: "Loop 1"
+        notes:
+          - This is an override for loop 1
+      - name: "Loop 2"
+      - name: "Loop 3"      
     outcomes:
       warn:
         message: "File is present, but empty"
