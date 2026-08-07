@@ -29,7 +29,7 @@ import (
    ========================= */
 
 var (
-	Version   = "1.1.1"
+	Version   = "1.2.0"
 	GitCommit = "dev"
 	BuildDate = "2026-05-11"
 )
@@ -58,6 +58,8 @@ var (
 	showFilter       string
 	colorMode        string // auto|always|never
 	useColor         bool   // resolved runtime decision
+	outputMode       string // detailed|compact
+	compactMode      bool   // resolved from outputMode
 	enableAnsiVars   bool
 	manifest         string
 	levelArg         string
@@ -86,24 +88,19 @@ func logAt(l logLevel, format string, a ...any) {
 		WARN:  "[WARN]  ",
 		ERROR: "[ERROR] ",
 	}[l]
+	ts := time.Now().Format("15:04:05")
 
 	// Guard against ANSI bleed:
-	// - If colors are enabled, reset BEFORE prefix,
-	//   print the message, then reset AFTER.
+	// - If colors are enabled, reset before timestamp,
+	//   dim timestamp, reset, colorize the level prefix, reset before the message, then reset after.
 	if useColor {
-		const reset = "\x1b[0m"
 		msg := fmt.Sprintf(format, a...)
-		// Prepend reset (protect prefix) and append reset (protect next line).
-		fmt.Fprint(os.Stdout, reset)
-		fmt.Fprint(os.Stdout, prefix)
-		fmt.Fprint(os.Stdout, msg)
-		fmt.Fprint(os.Stdout, reset)
-		fmt.Fprint(os.Stdout, "\n")
+		fmt.Fprint(os.Stdout, reset+colorize(ts, dim)+" "+colorForLevel(l)+prefix+reset+msg+reset+"\n")
 		return
 	}
 
 	// No color: normal print
-	fmt.Fprintf(os.Stdout, prefix+format+"\n", a...)
+	fmt.Fprintf(os.Stdout, ts+" "+prefix+format+"\n", a...)
 }
 
 func setLevel(s string) {
@@ -213,6 +210,59 @@ func stdoutIsTTY() bool {
 
 func stripANSI(s string) string {
 	return ansiRE.ReplaceAllString(s, "")
+}
+
+// ANSI color helpers (no-op when colors are disabled).
+const (
+	reset     = "\x1b[0m"
+	green     = "\x1b[0;32m"
+	red       = "\x1b[0;31m"
+	yellow    = "\x1b[0;33m"
+	blue      = "\x1b[0;34m"
+	magenta   = "\x1b[0;35m"
+	cyan      = "\x1b[0;36m"
+	boldWhite = "\x1b[1;37m"
+	boldCyan  = "\x1b[1;36m"
+	dim       = "\x1b[2;37m"
+)
+
+func colorize(s, code string) string {
+	if !useColor || code == "" {
+		return s
+	}
+	return code + s + reset
+}
+
+func colorForLevel(l logLevel) string {
+	switch l {
+	case DEBUG:
+		return dim
+	case INFO:
+		return cyan
+	case WARN:
+		return yellow
+	case ERROR:
+		return red
+	}
+	return ""
+}
+
+func indent(depth int) string {
+	if depth <= 0 {
+		return ""
+	}
+	return colorize(strings.Repeat("  ", depth), dim)
+}
+
+func taskSeparator(depth, width int) string {
+	return colorize(strings.Repeat("  ", depth)+strings.Repeat("─", width), dim)
+}
+
+func printTaskSeparator(depth int) {
+	if compactMode {
+		return
+	}
+	fmt.Println(taskSeparator(depth, 60))
 }
 
 /* =========================
@@ -1325,6 +1375,11 @@ func runWithInterpreterLive(
    ========================= */
 
 func startProgress(name string) (stop func()) {
+	// In compact mode, don't emit any progress lines.
+	if compactMode {
+		return func() {}
+	}
+
 	// If DEBUG, just print start/finish lines (no spinner).
 	if level == DEBUG {
 		start := time.Now()
@@ -1355,7 +1410,6 @@ func startProgress(name string) (stop func()) {
 		i := 0
 		ticker := time.NewTicker(120 * time.Millisecond)
 		defer ticker.Stop()
-		const reset = "\x1b[0m"
 		for {
 			select {
 			case <-done:
@@ -1410,6 +1464,7 @@ func main() {
 	flag.StringVar(&showFilter, "show", "", "Show rendered script for validations matching the given Validation ID or name pattern, then exit")
 	flag.BoolVar(&enableAnsiVars, "ansi-vars", true, "Expose built-in ANSI color variables to scripts (can be overridden by manifest)")
 	flag.StringVar(&colorMode, "color", "auto", "Color output: auto|always|never (affects child output pass-through)")
+	flag.StringVar(&outputMode, "output", "detailed", "Output mode: detailed|compact")
 	flag.Var(&extraVarFlags, "extra-var", "Specify extra variables for config template as key=value pairs (can be specified multiple times)")
 	flag.Var(&extraVarFlags, "e", "Alias for --extra-var")
 
@@ -1442,11 +1497,14 @@ func main() {
 		enableWindowsANSI()
 	}
 
+	// Resolve output mode
+	compactMode = strings.ToLower(strings.TrimSpace(outputMode)) == "compact"
+
 	if manifest == "" && flag.NArg() > 0 {
 		manifest = flag.Arg(0)
 	}
 	if manifest == "" {
-		fmt.Fprintln(os.Stderr, "Usage: validator --manifest <path> [--log-level DEBUG] [--show-output] [--dump-script] [--version] [--strict] [--color auto|always|never]")
+		fmt.Fprintln(os.Stderr, "Usage: validator --manifest <path> [--log-level DEBUG] [--show-output] [--dump-script] [--version] [--strict] [--color auto|always|never] [--output detailed|compact]")
 		os.Exit(2)
 	}
 	setLevel(levelArg)
@@ -1504,42 +1562,79 @@ func main() {
 	}
 
 	if !noSummary && len(ctx.Results) > 0 {
-		fmt.Println("\n--- Validation Summary ---")
-		passCount := 0
-		failCount := 0
-		warnCount := 0
-		skipCount := 0
+		fmt.Printf("\n%s\n", colorize("--- Validation Summary ---", boldCyan))
+		statusColor := map[string]string{
+			"PASS": green,
+			"FAIL": red,
+			"WARN": yellow,
+			"SKIP": blue,
+		}
+		statusIcon := map[string]string{
+			"PASS": "✅",
+			"FAIL": "❌",
+			"WARN": "⚠️",
+			"SKIP": "⏭️",
+		}
+
+		grouped := make(map[string][]summaryResult)
+		var manifestOrder []string
 		for _, res := range ctx.Results {
-			icon := ""
-			switch res.Status {
-			case "PASS":
-				icon = "✅"
-				passCount++
-			case "FAIL":
-				icon = "❌"
-				failCount++
-			case "WARN":
-				icon = "⚠️"
-				warnCount++
-			case "SKIP":
-				icon = "⏭️"
-				skipCount++
+			if _, ok := grouped[res.Manifest]; !ok {
+				grouped[res.Manifest] = []summaryResult{}
+				manifestOrder = append(manifestOrder, res.Manifest)
 			}
-			fmt.Printf("%s Validation #%-4s [%s] %-30s [%s]\n", icon, res.ExecDisplay, res.ValidationID, res.Name, res.Status)
-			if len(res.Notes) > 0 {
-				fmt.Println("   Notes:")
-				for _, note := range res.Notes {
-					fmt.Printf("   - %s\n", note)
+			grouped[res.Manifest] = append(grouped[res.Manifest], res)
+		}
+
+		totalPass, totalFail, totalWarn, totalSkip := 0, 0, 0, 0
+		for _, m := range manifestOrder {
+			results := grouped[m]
+			p, f, w, s := 0, 0, 0, 0
+			fmt.Printf("\n%s %s\n", colorize("Manifest:", boldWhite), colorize(m, cyan))
+			for _, res := range results {
+				switch res.Status {
+				case "PASS":
+					p++
+					totalPass++
+				case "FAIL":
+					f++
+					totalFail++
+				case "WARN":
+					w++
+					totalWarn++
+				case "SKIP":
+					s++
+					totalSkip++
+				}
+				fmt.Printf("%s Validation #%-4s [%s] %-30s [%s]\n", statusIcon[res.Status], res.ExecDisplay, res.ValidationID, res.Name, colorize(res.Status, statusColor[res.Status]))
+				if len(res.Notes) > 0 {
+					fmt.Println(colorize("   Notes:", dim))
+					for _, note := range res.Notes {
+						fmt.Printf("%s %s\n", colorize("   -", dim), note)
+					}
 				}
 			}
+			fmt.Printf("  %s: %d (Pass: %s, Fail: %s, Warn: %s, Skip: %s)\n",
+				colorize("Subtotal", dim),
+				len(results),
+				colorize(fmt.Sprintf("%d", p), green),
+				colorize(fmt.Sprintf("%d", f), red),
+				colorize(fmt.Sprintf("%d", w), yellow),
+				colorize(fmt.Sprintf("%d", s), blue))
 		}
-		fmt.Printf("\nTotal: %d (Pass: %d, Fail: %d, Warn: %d, Skip: %d)\n", len(ctx.Results), passCount, failCount, warnCount, skipCount)
+		fmt.Printf("\n%s: %d (Pass: %s, Fail: %s, Warn: %s, Skip: %s)\n",
+			colorize("Total", boldWhite),
+			len(ctx.Results),
+			colorize(fmt.Sprintf("%d", totalPass), green),
+			colorize(fmt.Sprintf("%d", totalFail), red),
+			colorize(fmt.Sprintf("%d", totalWarn), yellow),
+			colorize(fmt.Sprintf("%d", totalSkip), blue))
 	}
 
 	if overallRC == 0 {
-		logAt(INFO, "All validations PASSED \u2705")
+		logAt(INFO, "%s", colorize("All validations PASSED ✅", green))
 	} else {
-		logAt(ERROR, "One or more validations FAILED \u274c")
+		logAt(ERROR, "%s", colorize("One or more validations FAILED ❌", red))
 	}
 	os.Exit(overallRC)
 }

@@ -17,6 +17,7 @@ import (
 )
 
 type summaryResult struct {
+	Manifest     string
 	ExecDisplay  string
 	ValidationID string
 	Name         string
@@ -102,10 +103,10 @@ func shouldRunLoopItem(item loopItem, loopFilters []string) bool {
 	return false
 }
 
-func (ctx *runContext) addResult(execDisplay, validationID, name, status string, notes []string) {
+func (ctx *runContext) addResult(manifest, execDisplay, validationID, name, status string, notes []string) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
-	ctx.Results = append(ctx.Results, summaryResult{ExecDisplay: execDisplay, ValidationID: validationID, Name: name, Status: status, Notes: notes})
+	ctx.Results = append(ctx.Results, summaryResult{Manifest: manifest, ExecDisplay: execDisplay, ValidationID: validationID, Name: name, Status: status, Notes: notes})
 }
 
 func evaluateConditions(conditions []condition, ctx *runContext) (bool, error) {
@@ -187,7 +188,7 @@ func listManifestValidations(manifestPath string, includeVars map[string]any, de
 
 	prefix := strings.Repeat("  ", depth)
 	if depth == 0 {
-		fmt.Println("--- Validation List ---")
+		fmt.Printf("%s\n", colorize("--- Validation List ---", boldCyan))
 	}
 
 	for _, v := range validations {
@@ -203,7 +204,7 @@ func listManifestValidations(manifestPath string, includeVars map[string]any, de
 		if len(v.Loop) > 0 {
 			loopInfo = fmt.Sprintf(" loop=%d", len(v.Loop))
 		}
-		fmt.Printf("%sValidation #%-2d [%s] %s%s%s%s\n", prefix, v.ExecNumber, v.ValidationID, v.Name, tags, conditions, loopInfo)
+		fmt.Printf("%s%s %s %s %s%s%s%s\n", prefix, colorize("Validation", boldCyan), colorize(fmt.Sprintf("#%-2d", v.ExecNumber), cyan), colorize(fmt.Sprintf("[%s]", v.ValidationID), yellow), v.Name, tags, conditions, loopInfo)
 
 		for i, li := range v.Loop {
 			loopTags := ""
@@ -218,7 +219,7 @@ func listManifestValidations(manifestPath string, includeVars map[string]any, de
 			if name == "" {
 				name = fmt.Sprintf("loop %d", i+1)
 			}
-			fmt.Printf("%s  🔄 %s%s%s\n", prefix, name, loopTags, loopVars)
+			fmt.Printf("%s  %s %s%s%s\n", prefix, colorize("🔄", blue), name, loopTags, loopVars)
 		}
 
 		for _, inc := range v.Includes {
@@ -239,7 +240,7 @@ func listManifestValidations(manifestPath string, includeVars map[string]any, de
 			for k, val := range inc.Vars {
 				incVars[k] = val
 			}
-			fmt.Printf("%s  └─ include: %s (path: %s)\n", prefix, inc.Name, inc.Path)
+			fmt.Printf("%s  %s %s (%s: %s)\n", prefix, colorize("└─", dim), colorize(fmt.Sprintf("include: %s", inc.Name), magenta), colorize("path", dim), colorize(inc.Path, dim))
 			listManifestValidations(incPath, incVars, depth+1)
 		}
 	}
@@ -304,7 +305,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 	if !dumpScript && ctx.ShowFilter == "" && depth == 0 {
 		logAt(INFO, "Using auto-detected default interpreter: %s", autoInterp)
 		logAt(INFO, "Found %d validation(s) to run.", len(validations))
-		fmt.Println()
+		printTaskSeparator(depth)
 	}
 
 	overallRC := 0
@@ -331,21 +332,23 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 			if err != nil {
 				execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
 				if !dumpScript && ctx.ShowFilter == "" {
-					logAt(ERROR, "⚠ Condition error for '#%s %s %s': %v", execDisp, v.ValidationID, v.Name, err)
+					logAt(ERROR, "%s%s Condition error for '%s %s %s': %v", indent(depth), colorize("⚠", yellow), colorize(fmt.Sprintf("#%s", execDisp), cyan), colorize(v.ValidationID, yellow), colorize(v.Name, boldWhite), err)
 					overallRC = 1
-					ctx.addResult(execDisp, v.ValidationID, v.Name, "FAIL", nil)
-					fmt.Println()
+					ctx.addResult(manifestPath, execDisp, v.ValidationID, v.Name, "FAIL", nil)
+					printTaskSeparator(depth)
 				} else if dumpScript {
 					fmt.Printf("\n# --- [%s] SKIPPED (condition error: %v) ---\n", v.Name, err)
 				}
 				continue
 			}
 			if !ok {
+				execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
 				if !dumpScript && ctx.ShowFilter == "" {
-					execDisp := fmt.Sprintf("%s%d", ctx.ExecPrefix, v.ExecNumber)
-					logAt(INFO, "⏭️  Skipped '#%s %s %s': condition not met", execDisp, v.ValidationID, v.Name)
-					ctx.addResult(execDisp, v.ValidationID, v.Name, "SKIP", nil)
-					fmt.Println()
+					ctx.addResult(manifestPath, execDisp, v.ValidationID, v.Name, "SKIP", nil)
+					if !compactMode {
+						logAt(INFO, "%s%s  Skipped '%s %s %s': condition not met", indent(depth), colorize("⏭️", blue), colorize(fmt.Sprintf("#%s", execDisp), cyan), colorize(v.ValidationID, yellow), colorize(v.Name, boldWhite))
+						printTaskSeparator(depth)
+					}
 				} else if dumpScript {
 					fmt.Printf("\n# --- [%s] SKIPPED (condition not met) ---\n", v.Name)
 				}
@@ -397,15 +400,12 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 				iterExecDisp = baseExecDisp + "@" + loopLabel
 			}
 
-			if !dumpScript && ctx.ShowFilter == "" {
-				prefix := ""
-				if depth > 0 {
-					prefix = strings.Repeat("  ", depth)
-				}
+			if !dumpScript && ctx.ShowFilter == "" && !compactMode {
+				prefix := indent(depth)
 				if iter.item != nil {
-					logAt(INFO, "%s▶ [#%s %s] Running validation: %s", prefix, iterExecDisp, v.ValidationID, iterName)
+					logAt(INFO, "%s%s [#%s %s] %s", prefix, colorize("▶", blue), colorize(iterExecDisp, cyan), colorize(v.ValidationID, yellow), colorize(fmt.Sprintf("Running validation: %s", iterName), cyan))
 				} else {
-					logAt(INFO, "%s▶ [#%s %s] Running validation: %s", prefix, iterExecDisp, v.ValidationID, v.Name)
+					logAt(INFO, "%s%s [#%s %s] %s", prefix, colorize("▶", blue), colorize(iterExecDisp, cyan), colorize(v.ValidationID, yellow), colorize(fmt.Sprintf("Running validation: %s", v.Name), cyan))
 				}
 			}
 
@@ -446,11 +446,11 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 
 			if strings.TrimSpace(iterScript) == "" {
 				if len(v.Includes) == 0 {
-					logAt(WARN, "⚠ Skipped '%s': empty script.", iterName)
+					logAt(WARN, "%s%s Skipped '%s': empty script.", indent(depth), colorize("⚠", yellow), colorize(iterName, boldWhite))
 					if overallRC == 0 {
 						overallRC = 1
 					}
-					fmt.Println()
+					printTaskSeparator(depth)
 					continue
 				}
 			} else {
@@ -541,7 +541,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 				if err != nil {
 					logAt(ERROR, "[%s] Template error in script: %v", iterName, err)
 					overallRC = 1
-					fmt.Println()
+					printTaskSeparator(depth)
 					continue
 				}
 				iterScript = scriptTemplated
@@ -557,7 +557,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					} else {
 						logAt(ERROR, "[%s] Template error in pass message: %v", iterName, err)
 						overallRC = 1
-						fmt.Println()
+						printTaskSeparator(depth)
 						continue
 					}
 				}
@@ -567,7 +567,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					} else {
 						logAt(ERROR, "[%s] Template error in fail message: %v", iterName, err)
 						overallRC = 1
-						fmt.Println()
+						printTaskSeparator(depth)
 						continue
 					}
 				}
@@ -577,7 +577,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					} else {
 						logAt(ERROR, "[%s] Template error in warn message: %v", iterName, err)
 						overallRC = 1
-						fmt.Println()
+						printTaskSeparator(depth)
 						continue
 					}
 				}
@@ -686,7 +686,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					if err != nil {
 						logAt(ERROR, "[%s] Execution error: %v", iterName, err)
 						overallRC = 1
-						fmt.Println()
+						printTaskSeparator(depth)
 						continue
 					}
 
@@ -704,34 +704,34 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 					}
 
 					if len(v.Warn.ExitCodes) > 0 && matchCode(res.ExitCode, v.Warn.ExitCodes) {
-						logAt(WARN, "⚠️ Validation '#%s %s %s' WARNING: %s", iterExecDisp, v.ValidationID, iterName, renderedWarnMsg)
-						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "WARN", renderedNotes)
+						logAt(WARN, "%s%s Validation '%s %s %s' %s: %s", indent(depth), colorize("⚠️", yellow), colorize(fmt.Sprintf("#%s", iterExecDisp), cyan), colorize(v.ValidationID, yellow), colorize(iterName, boldWhite), colorize("WARNING", yellow), renderedWarnMsg)
+						ctx.addResult(manifestPath, iterExecDisp, v.ValidationID, iterName, "WARN", renderedNotes)
 					} else if len(v.Pass.ExitCodes) > 0 && matchCode(res.ExitCode, v.Pass.ExitCodes) {
-						logAt(INFO, "✅ Validation '#%s %s %s' PASSED: %s", iterExecDisp, v.ValidationID, iterName, renderedPassMsg)
-						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "PASS", renderedNotes)
+						logAt(INFO, "%s%s Validation '%s %s %s' %s: %s", indent(depth), colorize("✅", green), colorize(fmt.Sprintf("#%s", iterExecDisp), cyan), colorize(v.ValidationID, yellow), colorize(iterName, boldWhite), colorize("PASSED", green), renderedPassMsg)
+						ctx.addResult(manifestPath, iterExecDisp, v.ValidationID, iterName, "PASS", renderedNotes)
 					} else if len(v.Fail.ExitCodes) > 0 && matchCode(res.ExitCode, v.Fail.ExitCodes) {
-						logAt(ERROR, "❌ Validation '#%s %s %s' FAILED: %s", iterExecDisp, v.ValidationID, iterName, renderedFailMsg)
+						logAt(ERROR, "%s%s Validation '%s %s %s' %s: %s", indent(depth), colorize("❌", red), colorize(fmt.Sprintf("#%s", iterExecDisp), cyan), colorize(v.ValidationID, yellow), colorize(iterName, boldWhite), colorize("FAILED", red), renderedFailMsg)
 						overallRC = 1
-						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "FAIL", renderedNotes)
+						ctx.addResult(manifestPath, iterExecDisp, v.ValidationID, iterName, "FAIL", renderedNotes)
 					} else if res.ExitCode == 0 {
-						logAt(INFO, "✅ Validation '#%s %s %s' PASSED: %s", iterExecDisp, v.ValidationID, iterName, renderedPassMsg)
-						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "PASS", renderedNotes)
+						logAt(INFO, "%s%s Validation '%s %s %s' %s: %s", indent(depth), colorize("✅", green), colorize(fmt.Sprintf("#%s", iterExecDisp), cyan), colorize(v.ValidationID, yellow), colorize(iterName, boldWhite), colorize("PASSED", green), renderedPassMsg)
+						ctx.addResult(manifestPath, iterExecDisp, v.ValidationID, iterName, "PASS", renderedNotes)
 					} else {
-						logAt(ERROR, "❌ Validation '#%s %s %s' FAILED: %s", iterExecDisp, v.ValidationID, iterName, renderedFailMsg)
+						logAt(ERROR, "%s%s Validation '%s %s %s' %s: %s", indent(depth), colorize("❌", red), colorize(fmt.Sprintf("#%s", iterExecDisp), cyan), colorize(v.ValidationID, yellow), colorize(iterName, boldWhite), colorize("FAILED", red), renderedFailMsg)
 						overallRC = 1
-						ctx.addResult(iterExecDisp, v.ValidationID, iterName, "FAIL", renderedNotes)
+						ctx.addResult(manifestPath, iterExecDisp, v.ValidationID, iterName, "FAIL", renderedNotes)
 					}
 				}
 			}
 
 			if len(v.Includes) > 0 {
 				for _, inc := range v.Includes {
-					if !dumpScript && ctx.ShowFilter == "" {
-						prefix := strings.Repeat("  ", depth)
+					if !dumpScript && ctx.ShowFilter == "" && !compactMode {
+						prefix := indent(depth)
 						if iter.item != nil {
-							logAt(INFO, "%s🔗 Including manifest: %s (path: %s)%s", prefix, inc.Name, inc.Path, iterSuffix)
+							logAt(INFO, "%s%s %s (%s: %s)%s", prefix, colorize("🔗", magenta), colorize(fmt.Sprintf("Including manifest: %s", inc.Name), magenta), colorize("path", dim), colorize(inc.Path, dim), iterSuffix)
 						} else {
-							logAt(INFO, "%s🔗 Including manifest: %s (path: %s)", prefix, inc.Name, inc.Path)
+							logAt(INFO, "%s%s %s (%s: %s)", prefix, colorize("🔗", magenta), colorize(fmt.Sprintf("Including manifest: %s", inc.Name), magenta), colorize("path", dim), colorize(inc.Path, dim))
 						}
 					}
 
@@ -799,7 +799,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 			}
 
 			if len(v.Includes) == 0 || strings.TrimSpace(iterScript) != "" {
-				fmt.Println()
+				printTaskSeparator(depth)
 			}
 		}
 	}
