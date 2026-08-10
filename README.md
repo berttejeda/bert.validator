@@ -37,15 +37,51 @@
 
 ## Installation
 
-Ensure you have Go installed, then clone the repository and build:
+### Homebrew (macOS / Linux)
+
+The easiest way to install `bert.validator` is via the Homebrew tap:
 
 ```bash
-git clone https://github.com/bertejeda/bert.validator.git
+brew tap berttejeda/tap https://github.com/berttejeda/bert.validator.git
+brew install berttejeda/tap/bert-validator
+```
+
+This builds the latest release from source using Homebrew's Go toolchain and installs the binary as `validator`.
+
+### Download a pre-built binary
+
+Pre-built archives for Linux, Windows, and macOS (Intel and Apple Silicon) are
+attached to each [GitHub Release](https://github.com/berttejeda/bert.validator/releases).
+Each archive contains the binary named `validator` (`validator.exe` on Windows).
+
+Choose the asset that matches your platform, for example:
+
+```bash
+# macOS Apple Silicon
+curl -L -o bert.validator-darwin-arm64.tar.gz https://github.com/berttejeda/bert.validator/releases/latest/download/bert.validator-darwin-arm64.tar.gz
+tar -xzf bert.validator-darwin-arm64.tar.gz
+mv validator /usr/local/bin/
+```
+
+Replace `bert.validator-darwin-arm64.tar.gz` with the appropriate asset for your OS and architecture:
+
+| OS      | x86          | x64            | Apple Silicon  |
+|---------|--------------|----------------|----------------|
+| Linux   | `linux-386`  | `linux-amd64`  | —              |
+| Windows | `windows-386`| `windows-amd64`| —              |
+| macOS   | —            | `darwin-amd64` | `darwin-arm64` |
+
+### Build from source
+
+Ensure you have [Go](https://go.dev/) installed, then clone the repository and build:
+
+```bash
+git clone https://github.com/berttejeda/bert.validator.git
 cd bert.validator
 go build -o validator .
 ```
 
-Move the `validator` binary to your PATH.
+Move the `validator` binary to a directory on your `PATH`.
 
 ## Usage
 

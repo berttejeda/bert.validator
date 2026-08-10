@@ -49,16 +49,19 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           DATE=$(date -u +%Y-%m-%d)
           COMMIT="${GITHUB_SHA::7}"
-          OUT="bert.validator-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          BIN="validator${{ matrix.ext }}"
+          ARCHIVE="bert.validator-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+          mkdir -p build
           go build -trimpath \
             -ldflags "-s -w -X main.Version=${VERSION} -X main.GitCommit=${COMMIT} -X main.BuildDate=${DATE}" \
-            -o "${OUT}"
+            -o "build/${BIN}"
+          tar -czf "${ARCHIVE}" -C build "${BIN}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bert.validator-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: bert.validator-${{ matrix.goos }}-${{ matrix.goarch }}*
+          path: bert.validator-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
           if-no-files-found: error
 
   release:

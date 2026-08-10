@@ -12,7 +12,7 @@ class BertValidator < Formula
   desc "YAML-driven script validator"
   homepage "https://github.com/berttejeda/bert.validator"
   url "https://github.com/berttejeda/bert.validator/archive/refs/tags/v1.2.0.tar.gz"
-  sha256 "d5558cd419c8d46bdc958064cb97f963d1ea793866414c025906ec15033512ed"
+  sha256 "449a9e63f98252af7e9745017ab126d5bd1ae29df1226ea7cda0fbec7c341521"
   license "MIT"
   head "https://github.com/berttejeda/bert.validator.git", branch: "main"
 
@@ -21,10 +21,10 @@ class BertValidator < Formula
   def install
     system "go", "build", "-trimpath",
            "-ldflags", "-s -w -X main.Version=#{version}",
-           "-o", bin/"bert.validator"
+           "-o", bin/"validator"
   end
 
   test do
-    system bin/"bert.validator", "--version"
+    system bin/"validator", "--version"
   end
 end
