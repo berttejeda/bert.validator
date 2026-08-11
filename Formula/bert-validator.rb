@@ -11,8 +11,8 @@
 class BertValidator < Formula
   desc "YAML-driven script validator"
   homepage "https://github.com/berttejeda/bert.validator"
-  url "https://github.com/berttejeda/bert.validator/archive/refs/tags/v1.4.0.tar.gz"
-  sha256 "88ece9034f8e62c24273e5584226233d8579a45a6e7075133160d7e090967941"
+  url "https://github.com/berttejeda/bert.validator/archive/refs/tags/v1.5.0.tar.gz"
+  sha256 "27a413cffea41b9968d783c43f0b2ad4948b4c9be58693cc5eaa59df203e5941"
   license "MIT"
   head "https://github.com/berttejeda/bert.validator.git", branch: "main"
 
