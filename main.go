@@ -21,6 +21,7 @@ import (
 	"time"
 
 	sprig "github.com/Masterminds/sprig/v3"
+	"github.com/savioxavier/termlink"
 	"gopkg.in/yaml.v3"
 )
 
@@ -29,9 +30,9 @@ import (
    ========================= */
 
 var (
-	Version   = "1.2.0"
+	Version   = "1.3.0"
 	GitCommit = "dev"
-	BuildDate = "2026-05-11"
+	BuildDate = "2026-08-11"
 )
 
 /* =========================
@@ -76,6 +77,11 @@ var (
 
 	// ANSI pattern (used to strip when --color=never)
 	ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+	// Markdown and plain HTTP(S) URL patterns for terminal hyperlinking
+	mdPattern   = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	urlPattern  = regexp.MustCompile(`https?://\S+`)
+	linkPattern = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)|https?://\S+`)
 )
 
 func logAt(l logLevel, format string, a ...any) {
@@ -263,6 +269,25 @@ func printTaskSeparator(depth int) {
 		return
 	}
 	fmt.Println(taskSeparator(depth, 60))
+}
+
+func linkify(s string) string {
+	if !useColor || !termlink.SupportsHyperlinks() {
+		return s
+	}
+	return linkPattern.ReplaceAllStringFunc(s, func(match string) string {
+		if md := mdPattern.FindStringSubmatch(match); md != nil {
+			return termlink.Link(md[1], md[2])
+		}
+		trimmed := strings.TrimRightFunc(match, func(r rune) bool {
+			return r == '.' || r == ',' || r == ')' || r == ']' || r == '}' || r == ';' || r == '>'
+		})
+		link := termlink.Link(trimmed, trimmed)
+		if len(trimmed) < len(match) {
+			link += match[len(trimmed):]
+		}
+		return link
+	})
 }
 
 /* =========================
@@ -1606,11 +1631,11 @@ func main() {
 					s++
 					totalSkip++
 				}
-				fmt.Printf("%s Validation #%-4s [%s] %-30s [%s]\n", statusIcon[res.Status], res.ExecDisplay, res.ValidationID, res.Name, colorize(res.Status, statusColor[res.Status]))
+				fmt.Printf("%s Validation #%-4s [%s] %-30s [%s]\n", statusIcon[res.Status], res.ExecDisplay, res.ValidationID, linkify(res.Name), colorize(res.Status, statusColor[res.Status]))
 				if len(res.Notes) > 0 {
 					fmt.Println(colorize("   Notes:", dim))
 					for _, note := range res.Notes {
-						fmt.Printf("%s %s\n", colorize("   -", dim), note)
+						fmt.Printf("%s %s\n", colorize("   -", dim), linkify(note))
 					}
 				}
 			}

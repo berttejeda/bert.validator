@@ -56,7 +56,7 @@ validations:
     loop:
       - name: "Loop 1"
         notes:
-          - This is an override for loop 1
+          - This is an override for loop 1 [google](https://google.com)
       - name: "Loop 2"
       - name: "Loop 3"      
     outcomes:
