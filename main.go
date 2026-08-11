@@ -30,7 +30,7 @@ import (
    ========================= */
 
 var (
-	Version   = "1.3.0"
+	Version   = "1.4.0"
 	GitCommit = "dev"
 	BuildDate = "2026-08-11"
 )
@@ -216,6 +216,21 @@ func stdoutIsTTY() bool {
 
 func stripANSI(s string) string {
 	return ansiRE.ReplaceAllString(s, "")
+}
+
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		switch {
+		case r == 0xFE0E || r == 0xFE0F:
+			// emoji variation selectors have no display width
+		case r >= 0x2000:
+			w += 2
+		default:
+			w++
+		}
+	}
+	return w
 }
 
 // ANSI color helpers (no-op when colors are disabled).
@@ -692,6 +707,12 @@ type condition struct {
 	Eval string `yaml:"eval"`
 }
 
+type initEntry struct {
+	Name      string
+	SkipError bool
+	Script    string
+}
+
 type validation struct {
 	ExecNumber       int
 	ValidationID     string
@@ -816,15 +837,15 @@ func loadManifest(path string) (*manifestData, error) {
 
 }
 
-func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs functionsMap, vals []validation, err error) {
+func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs functionsMap, inits []initEntry, vals []validation, err error) {
 	dupKeyCount = 0 // reset for each parse
 
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, manifestDefaults{}, nil, nil, errors.New("invalid YAML document")
+		return nil, manifestDefaults{}, nil, nil, nil, errors.New("invalid YAML document")
 	}
 	top := root.Content[0]
 	if top.Kind != yaml.MappingNode {
-		return nil, manifestDefaults{}, nil, nil, errors.New("top-level YAML must be a mapping")
+		return nil, manifestDefaults{}, nil, nil, nil, errors.New("top-level YAML must be a mapping")
 	}
 
 	// warn duplicates at top level
@@ -853,6 +874,33 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 		}
 	}
 
+	// top-level init (optional)
+	if iNode := getMapValue(top, "init"); iNode != nil && iNode.Kind == yaml.SequenceNode {
+		for _, item := range iNode.Content {
+			if item.Kind != yaml.MappingNode {
+				return nil, manifestDefaults{}, nil, nil, nil, errors.New("each init entry must be a mapping")
+			}
+			warnDuplicateKeys(item, "init")
+			var name string
+			if n := getMapValue(item, "name"); n != nil {
+				name = toString(n)
+			} else if len(item.Content) >= 2 && item.Content[0].Kind == yaml.ScalarNode {
+				name = item.Content[0].Value
+			}
+			if name == "" {
+				return nil, manifestDefaults{}, nil, nil, nil, errors.New("init entry missing a name")
+			}
+			ie := initEntry{Name: name}
+			if se := getMapValue(item, "skip_error"); se != nil {
+				ie.SkipError = strings.EqualFold(strings.TrimSpace(toString(se)), "true")
+			}
+			if s := getMapValue(item, "script"); s != nil {
+				ie.Script = toString(s)
+			}
+			inits = append(inits, ie)
+		}
+	}
+
 	// top-level functions (optional)
 	funcs = make(functionsMap)
 	if fNode := getMapValue(top, "functions"); fNode != nil && fNode.Kind == yaml.MappingNode {
@@ -876,7 +924,7 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 	if gv := getMapValue(top, "vars"); gv != nil {
 		gl, err2 := orderedVars(gv, "top-level")
 		if err2 != nil {
-			return nil, manifestDefaults{}, nil, nil, fmt.Errorf("top-level vars: %w", err2)
+			return nil, manifestDefaults{}, nil, nil, nil, fmt.Errorf("top-level vars: %w", err2)
 		}
 		globals = gl
 	}
@@ -884,12 +932,12 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 	// validations
 	vNode := getMapValue(top, "validations")
 	if vNode == nil || vNode.Kind != yaml.SequenceNode {
-		return nil, manifestDefaults{}, nil, nil, errors.New("`validations` must be a sequence")
+		return nil, manifestDefaults{}, nil, nil, nil, errors.New("`validations` must be a sequence")
 	}
 
 	for valIdx, item := range vNode.Content {
 		if item.Kind != yaml.MappingNode {
-			return nil, manifestDefaults{}, nil, nil, errors.New("each validation must be a mapping")
+			return nil, manifestDefaults{}, nil, nil, nil, errors.New("each validation must be a mapping")
 		}
 
 		warnDuplicateKeys(item, "validation")
@@ -913,11 +961,11 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 			name = item.Content[0].Value
 			body = item.Content[1]
 		} else {
-			return nil, manifestDefaults{}, nil, nil, errors.New("validation missing a name")
+			return nil, manifestDefaults{}, nil, nil, nil, errors.New("validation missing a name")
 		}
 
 		if body == nil || body.Kind != yaml.MappingNode {
-			return nil, manifestDefaults{}, nil, nil, fmt.Errorf("validation %q body must be a mapping", name)
+			return nil, manifestDefaults{}, nil, nil, nil, fmt.Errorf("validation %q body must be a mapping", name)
 		}
 
 		warnDuplicateKeys(body, fmt.Sprintf("validation %q", name))
@@ -1098,7 +1146,7 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 		if lv := getMapValue(body, "vars"); lv != nil {
 			lo, err2 := orderedVars(lv, fmt.Sprintf("validation %q", name))
 			if err2 != nil {
-				return nil, manifestDefaults{}, nil, nil, fmt.Errorf("validation %q vars: %w", name, err2)
+				return nil, manifestDefaults{}, nil, nil, nil, fmt.Errorf("validation %q vars: %w", name, err2)
 			}
 			localOrdered = lo
 		}
@@ -1136,10 +1184,10 @@ func parseManifest(root *yaml.Node) (globals []kv, defs manifestDefaults, funcs 
 
 	// If strict mode is on and we saw duplicates, fail parsing.
 	if strictMode && dupKeyCount > 0 {
-		return nil, manifestDefaults{}, nil, nil, fmt.Errorf("manifest contains %d duplicate key(s); re-run without --strict to see WARN logs", dupKeyCount)
+		return nil, manifestDefaults{}, nil, nil, nil, fmt.Errorf("manifest contains %d duplicate key(s); re-run without --strict to see WARN logs", dupKeyCount)
 	}
 
-	return globals, defs, funcs, vals, nil
+	return globals, defs, funcs, inits, vals, nil
 }
 
 /* =========================
@@ -1612,6 +1660,15 @@ func main() {
 		}
 
 		totalPass, totalFail, totalWarn, totalSkip := 0, 0, 0, 0
+
+		maxPrefix := 0
+		for _, res := range ctx.Results {
+			plain := fmt.Sprintf("%s Validation #%-4s [%s] %s", statusIcon[res.Status], res.ExecDisplay, res.ValidationID, res.Name)
+			if w := displayWidth(plain); w > maxPrefix {
+				maxPrefix = w
+			}
+		}
+
 		for _, m := range manifestOrder {
 			results := grouped[m]
 			p, f, w, s := 0, 0, 0, 0
@@ -1631,7 +1688,13 @@ func main() {
 					s++
 					totalSkip++
 				}
-				fmt.Printf("%s Validation #%-4s [%s] %-30s [%s]\n", statusIcon[res.Status], res.ExecDisplay, res.ValidationID, linkify(res.Name), colorize(res.Status, statusColor[res.Status]))
+				plain := fmt.Sprintf("%s Validation #%-4s [%s] %s", statusIcon[res.Status], res.ExecDisplay, res.ValidationID, res.Name)
+				prefix := fmt.Sprintf("%s Validation #%-4s [%s] %s", statusIcon[res.Status], res.ExecDisplay, res.ValidationID, linkify(res.Name))
+				pad := maxPrefix - displayWidth(plain)
+				if pad < 0 {
+					pad = 0
+				}
+				fmt.Printf("%s %s[%s]\n", prefix, strings.Repeat(" ", pad), colorize(res.Status, statusColor[res.Status]))
 				if len(res.Notes) > 0 {
 					fmt.Println(colorize("   Notes:", dim))
 					for _, note := range res.Notes {

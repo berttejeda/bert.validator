@@ -180,7 +180,7 @@ func listManifestValidations(manifestPath string, includeVars map[string]any, de
 		return
 	}
 
-	_, _, _, validations, err := parseManifest(&root)
+	_, _, _, _, validations, err := parseManifest(&root)
 	if err != nil {
 		logAt(ERROR, "Invalid manifest: %v", err)
 		return
@@ -295,7 +295,7 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 
 	tplMap := extractTemplates(&root)
 
-	globalOrdered, defs, funcs, validations, err := parseManifest(&root)
+	globalOrdered, defs, funcs, inits, validations, err := parseManifest(&root)
 	if err != nil {
 		logAt(ERROR, "Invalid manifest: %v", err)
 		return 2
@@ -309,6 +309,13 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 	}
 
 	overallRC := 0
+
+	if !dumpScript && ctx.ShowFilter == "" {
+		initRC := runInitEntries(inits, manifestPath, defs, funcs, globalOrdered, includeVars, tplMap, env, depth, ctx)
+		if initRC != 0 {
+			return initRC
+		}
+	}
 
 	for _, v := range validations {
 		if ctx.NameRe != nil {
@@ -804,4 +811,142 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 		}
 	}
 	return overallRC
+}
+
+func runInitEntries(
+	inits []initEntry,
+	manifestPath string,
+	defs manifestDefaults,
+	funcs functionsMap,
+	globalOrdered []kv,
+	includeVars map[string]any,
+	tplMap map[string]string,
+	env map[string]string,
+	depth int,
+	ctx *runContext,
+) int {
+	if len(inits) == 0 {
+		return 0
+	}
+
+	autoInterp, autoKind := autoDetectDefaultInterpreter()
+
+	manifestDir := "."
+	if !strings.HasPrefix(manifestPath, "http://") && !strings.HasPrefix(manifestPath, "https://") {
+		if abs, err := filepath.Abs(manifestPath); err == nil {
+			manifestDir = filepath.Dir(abs)
+		}
+	}
+
+	for i, ie := range inits {
+		execDisp := fmt.Sprintf("%sINIT-%d", ctx.ExecPrefix, i+1)
+		vid := computeValidationID(i+1, "init:"+ie.Name)
+		if !dumpScript && ctx.ShowFilter == "" && !compactMode {
+			logAt(INFO, "%s%s [#%s %s] %s", indent(depth), colorize("▶", blue), colorize(execDisp, cyan), colorize(vid, yellow), colorize(fmt.Sprintf("Running init: %s", linkify(ie.Name)), cyan))
+		}
+
+		interpPath := strings.TrimSpace(defs.InterpreterPath)
+		var kind interpreterKind
+		if interpPath == "" {
+			interpPath = autoInterp
+			kind = autoKind
+		} else {
+			kind = detectInterpreterKind(interpPath)
+		}
+
+		interpBase := strings.ToLower(filepath.Base(interpPath))
+		interpBase = strings.TrimSuffix(interpBase, ".exe")
+		script := ie.Script
+		for key, fList := range funcs {
+			match := false
+			if key == interpBase {
+				match = true
+			} else if key == "powershell" && interpBase == "pwsh" {
+				match = true
+			}
+			if match {
+				var sb strings.Builder
+				for _, fn := range fList {
+					sb.WriteString(fn.Source)
+					sb.WriteByte('\n')
+				}
+				script = sb.String() + script
+			}
+		}
+
+		flags := defs.InterpreterFlags
+
+		base := []kv{{Key: "MANIFEST_DIR", Value: manifestDir}}
+		if enableAnsiVars {
+			base = append(base, builtinAnsiVars()...)
+		}
+
+		includeVarsOrdered := []kv{}
+		for k, val := range includeVars {
+			includeVarsOrdered = append(includeVarsOrdered, kv{Key: k, Value: fmt.Sprintf("%v", val)})
+		}
+
+		mergedBI, _ := mergeVars(base, includeVarsOrdered)
+		mergedBG, _ := mergeVars(mergedBI, globalOrdered)
+		mergedList, mergedMap := mergeVars(mergedBG, []kv{})
+
+		templatesAny := make(map[string]any, len(tplMap))
+		for k, vTpl := range tplMap {
+			templatesAny[k] = vTpl
+		}
+
+		tmplCtx := buildTemplateContext(mergedMap, templatesAny, env)
+		renderedScript, err := renderTemplate(fmt.Sprintf("init_%d_script", i), script, tmplCtx)
+		if err != nil {
+			logAt(ERROR, "%s%s Init '%s' template error: %v", indent(depth), colorize("⚠", yellow), colorize(linkify(ie.Name), boldWhite), err)
+			ctx.addResult(manifestPath, execDisp, vid, "init: "+ie.Name, "FAIL", nil)
+			return 1
+		}
+
+		finalScript := renderedScript
+		if !defs.EnvOnly {
+			switch kind {
+			case interpShell, interpPowerShell, interpCmd:
+				if hdr := buildHeader(kind, mergedList); hdr != "" {
+					finalScript = hdr + "\n" + finalScript
+				}
+			}
+		}
+
+		extraEnv := map[string]string{}
+		if defs.EnvOnly || kind == interpOther {
+			for k, val := range mergedMap {
+				extraEnv[k] = val
+			}
+		}
+
+		res, err := runWithInterpreter(interpPath, flags, finalScript, extraEnv, kind)
+		if err != nil {
+			logAt(ERROR, "%s%s Init '%s' execution error: %v", indent(depth), colorize("⚠", yellow), colorize(linkify(ie.Name), boldWhite), err)
+			ctx.addResult(manifestPath, execDisp, vid, "init: "+ie.Name, "FAIL", nil)
+			if !ie.SkipError {
+				return 1
+			}
+			ctx.addResult(manifestPath, execDisp, vid, "init: "+ie.Name, "WARN", nil)
+			continue
+		}
+
+		if res.ExitCode == 0 {
+			logAt(INFO, "%s%s Init '%s' %s", indent(depth), colorize("✅", green), colorize(linkify(ie.Name), boldWhite), colorize("PASSED", green))
+			ctx.addResult(manifestPath, execDisp, vid, "init: "+ie.Name, "PASS", nil)
+			continue
+		}
+
+		if ie.SkipError {
+			logAt(WARN, "%s%s Init '%s' %s (exit %d); continuing", indent(depth), colorize("⚠️", yellow), colorize(linkify(ie.Name), boldWhite), colorize("SKIPPED", blue), res.ExitCode)
+			ctx.addResult(manifestPath, execDisp, vid, "init: "+ie.Name, "WARN", nil)
+			continue
+		}
+
+		logAt(ERROR, "%s%s Init '%s' %s (exit %d)", indent(depth), colorize("❌", red), colorize(linkify(ie.Name), boldWhite), colorize("FAILED", red), res.ExitCode)
+		ctx.addResult(manifestPath, execDisp, vid, "init: "+ie.Name, "FAIL", nil)
+		return 1
+	}
+
+	return 0
 }

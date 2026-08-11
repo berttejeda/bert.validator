@@ -7,6 +7,7 @@
 - [Installation](#installation)
 - [Usage](#usage)
 - [Manifest Syntax](#manifest-syntax)
+  - [Init Blocks](#init-blocks)
   - [Outcomes & Exit Codes](#outcomes--exit-codes)
   - [Shell Command Substitution in Variables](#shell-command-substitution-in-variables)
   - [Conditions](#conditions)
@@ -29,6 +30,7 @@
 - **Outcome-Based Results:** Define `pass`, `fail`, and `warn` outcomes with optional `exit_codes` lists for fine-grained result determination.
 - **Shell Command Substitution:** Variables are double-quoted in the generated script, so `$(...)` expressions are naturally evaluated at runtime.
 - **Conditional Execution:** Gate validation execution with `conditions` using Go-like boolean expressions powered by [expr](https://github.com/expr-lang/expr).
+- **Init Blocks:** Run one or more pre-validation setup or prerequisite checks with `init` entries; failures can optionally be ignored with `skip_error`.
 - **Inspection Tools:** Use `--list` to enumerate all validations with IDs, or `--show` to view the fully rendered script for a specific validation without executing.
 - **Loop Iterations:** Execute a validation multiple times with per-iteration variable overrides and loop-level tag filtering (`-t tag@loop_tag`).
 - **Manifest Includes:** Compose manifests by including other YAML files with variable passthrough and optional tag propagation.
@@ -163,6 +165,44 @@ validations:
       fail:
         message: "File is missing"
 ```
+
+### Init Blocks
+
+The optional top-level `init` key lets you run one or more pre-validation setup or prerequisite checks before the `validations` begin. Each init entry is executed in order using the manifest's default interpreter and has the same variable/templating support as validation scripts.
+
+| Key          | Required | Description |
+|--------------|----------|-------------|
+| `name`       | yes      | A display name for the init step. |
+| `script`     | yes      | The script to execute. |
+| `skip_error` | no       | If `true`, a non-zero exit code is reported as **WARN** and execution continues. If `false` or omitted, a non-zero exit code fails the manifest and validation processing stops. |
+
+Example:
+
+```yaml
+init:
+  - name: "Check for required binaries"
+    skip_error: false
+    script: |
+      missing=""
+      for binary in jq yq git; do
+        if ! command -v "$binary" >/dev/null 2>&1; then
+          missing="$missing $binary"
+        fi
+      done
+      if [ -z "$missing" ]; then
+        echo "All required binaries found"
+        exit 0
+      else
+        echo "Missing binaries:$missing"
+        exit 1
+      fi
+  - name: "Check File Exists"
+    skip_error: true
+    script: |
+      [ -f "/etc/hosts" ]
+```
+
+Init results are included in the final summary with `INIT-#` IDs (e.g. `init: Check for required binaries`).
 
 ### Outcomes & Exit Codes
 

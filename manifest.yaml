@@ -8,6 +8,33 @@ defaults:
   interpreters:
     script: "/bin/bash"
 
+init:
+  - name: "Check for required binaries"
+    skip_error: false
+    script: |
+      missing=""
+      for binary in jq yq git; do
+        if ! command -v "$binary" >/dev/null 2>&1; then
+          missing="$missing $binary"
+        fi
+      done
+      if [ -z "$missing" ]; then
+        echo "All required binaries found"
+        exit 0
+      else
+        echo "Missing binaries:$missing"
+        exit 1
+      fi
+  - name: "Check File Exists"
+    skip_error: true
+    script: |
+      if [ -f "/etc/hosts" ]; then
+        echo "File exists"
+        exit 0
+      else
+        exit 1
+      fi
+
 # Define reusable script functions (keyed by interpreter)
 functions:
   bash:
