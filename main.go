@@ -30,7 +30,7 @@ import (
    ========================= */
 
 var (
-	Version   = "1.4.0"
+	Version   = "1.5.0"
 	GitCommit = "dev"
 	BuildDate = "2026-08-11"
 )
@@ -48,6 +48,12 @@ const (
 	ERROR
 )
 
+type logRecord struct {
+	Time    string `json:"time" yaml:"time"`
+	Level   string `json:"level" yaml:"level"`
+	Message string `json:"message" yaml:"message"`
+}
+
 var (
 	level            = INFO
 	showOutputFlag   bool
@@ -64,6 +70,9 @@ var (
 	enableAnsiVars   bool
 	manifest         string
 	levelArg         string
+	logFile          string
+	logFileFormat    string
+	logRecords       []logRecord
 	defaultUnixShell = "/usr/bin/bash"
 	defaultWinShell  = "powershell.exe"
 
@@ -94,19 +103,122 @@ func logAt(l logLevel, format string, a ...any) {
 		WARN:  "[WARN]  ",
 		ERROR: "[ERROR] ",
 	}[l]
+	levelName := map[logLevel]string{
+		DEBUG: "DEBUG",
+		INFO:  "INFO",
+		WARN:  "WARN",
+		ERROR: "ERROR",
+	}[l]
 	ts := time.Now().Format("15:04:05")
+	msg := fmt.Sprintf(format, a...)
 
 	// Guard against ANSI bleed:
 	// - If colors are enabled, reset before timestamp,
 	//   dim timestamp, reset, colorize the level prefix, reset before the message, then reset after.
 	if useColor {
-		msg := fmt.Sprintf(format, a...)
 		fmt.Fprint(os.Stdout, reset+colorize(ts, dim)+" "+colorForLevel(l)+prefix+reset+msg+reset+"\n")
-		return
+	} else {
+		fmt.Fprintf(os.Stdout, ts+" "+prefix+"%s\n", msg)
 	}
 
-	// No color: normal print
-	fmt.Fprintf(os.Stdout, ts+" "+prefix+format+"\n", a...)
+	if logFile != "" {
+		logRecords = append(logRecords, logRecord{Time: ts, Level: levelName, Message: stripANSI(msg)})
+	}
+}
+
+func detectLogFormat(path, explicit string) string {
+	if explicit != "" {
+		return strings.ToLower(strings.TrimSpace(explicit))
+	}
+	ext := strings.TrimPrefix(filepath.Ext(strings.ToLower(path)), ".")
+	switch ext {
+	case "json":
+		return "json"
+	case "yaml", "yml":
+		return "yaml"
+	case "md", "markdown":
+		return "markdown"
+	}
+	return "json"
+}
+
+type logFileReport struct {
+	Logs    []logRecord     `json:"logs" yaml:"logs"`
+	Results []summaryResult `json:"results" yaml:"results"`
+}
+
+func writeLogFile(path, format string, results []summaryResult) error {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		format = detectLogFormat(path, "")
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	switch format {
+	case "json":
+		enc := json.NewEncoder(f)
+		enc.SetIndent("", "  ")
+		return enc.Encode(logFileReport{Logs: logRecords, Results: results})
+	case "yaml":
+		enc := yaml.NewEncoder(f)
+		defer enc.Close()
+		return enc.Encode(logFileReport{Logs: logRecords, Results: results})
+	case "markdown":
+		return writeMarkdownLog(f, results)
+	default:
+		return fmt.Errorf("unknown log file format: %s", format)
+	}
+}
+
+func writeMarkdownLog(w io.Writer, results []summaryResult) error {
+	fmt.Fprintln(w, "# Validation Log")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "## Messages")
+	fmt.Fprintln(w)
+	for _, r := range logRecords {
+		fmt.Fprintf(w, "* **%s [%s]** %s\n", r.Time, r.Level, r.Message)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "## Results")
+	fmt.Fprintln(w)
+	if len(results) == 0 {
+		fmt.Fprintln(w, "*No results.*")
+		return nil
+	}
+	grouped := make(map[string][]summaryResult)
+	var order []string
+	for _, res := range results {
+		if _, ok := grouped[res.Manifest]; !ok {
+			grouped[res.Manifest] = []summaryResult{}
+			order = append(order, res.Manifest)
+		}
+		grouped[res.Manifest] = append(grouped[res.Manifest], res)
+	}
+	for _, m := range order {
+		fmt.Fprintf(w, "### %s\n\n", m)
+		fmt.Fprintln(w, "| # | ID | Name | Status |")
+		fmt.Fprintln(w, "|---|---|---|---|")
+		for _, res := range grouped[m] {
+			fmt.Fprintf(w, "| %s | %s | %s | %s |\n", res.ExecDisplay, res.ValidationID, strings.ReplaceAll(res.Name, "|", "\\|"), res.Status)
+		}
+		fmt.Fprintln(w)
+	}
+	return nil
+}
+
+func maybeWriteLogFile(format string, results []summaryResult) {
+	if logFile == "" {
+		return
+	}
+	format = detectLogFormat(logFile, format)
+	if err := writeLogFile(logFile, format, results); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing log file %s: %v\n", logFile, err)
+	}
 }
 
 func setLevel(s string) {
@@ -1541,6 +1653,9 @@ func main() {
 	flag.Var(&extraVarFlags, "extra-var", "Specify extra variables for config template as key=value pairs (can be specified multiple times)")
 	flag.Var(&extraVarFlags, "e", "Alias for --extra-var")
 
+	flag.StringVar(&logFile, "log-file", "", "Write captured output to a file")
+	flag.StringVar(&logFileFormat, "log-file-format", "", "Log file format: json|yaml|markdown (auto-detected from --log-file extension by default)")
+
 	var filterNameRegex string
 	flag.StringVar(&filterNameRegex, "name", "", "Regex pattern to filter validations by name")
 	flag.StringVar(&filterNameRegex, "n", "", "Alias for --name")
@@ -1595,6 +1710,7 @@ func main() {
 		nameRe, err = regexp.Compile(filterNameRegex)
 		if err != nil {
 			logAt(ERROR, "Invalid name regex: %v", err)
+			maybeWriteLogFile(logFileFormat, nil)
 			os.Exit(2)
 		}
 	}
@@ -1625,12 +1741,14 @@ func main() {
 
 	if listValidations {
 		listManifestValidations(manifest, nil, 0)
+		maybeWriteLogFile(logFileFormat, nil)
 		os.Exit(0)
 	}
 
 	overallRC := executeManifest(manifest, nil, 0, ctx)
 
 	if dumpScript || showFilter != "" {
+		maybeWriteLogFile(logFileFormat, ctx.Results)
 		os.Exit(0)
 	}
 
@@ -1724,5 +1842,6 @@ func main() {
 	} else {
 		logAt(ERROR, "%s", colorize("One or more validations FAILED ❌", red))
 	}
+	maybeWriteLogFile(logFileFormat, ctx.Results)
 	os.Exit(overallRC)
 }
