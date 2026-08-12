@@ -30,7 +30,7 @@ import (
    ========================= */
 
 var (
-	Version   = "1.5.0"
+	Version   = "1.6.0"
 	GitCommit = "dev"
 	BuildDate = "2026-08-11"
 )
@@ -459,6 +459,45 @@ func findExecutable(candidates []string) string {
 		}
 	}
 	return ""
+}
+
+// activateVenv prepends a local .venv/Scripts (Windows) or .venv/bin
+// directory to PATH so that any python/python3 call resolves to the venv.
+func activateVenv() {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	venvDir := filepath.Join(cwd, ".venv")
+	st, err := os.Stat(venvDir)
+	if err != nil || !st.IsDir() {
+		return
+	}
+
+	binDir := "bin"
+	if runtime.GOOS == "windows" {
+		binDir = "Scripts"
+	}
+	venvBin := filepath.Join(venvDir, binDir)
+	st, err = os.Stat(venvBin)
+	if err != nil || !st.IsDir() {
+		return
+	}
+
+	path := os.Getenv("PATH")
+	if path != "" {
+		path = venvBin + string(os.PathListSeparator) + path
+	} else {
+		path = venvBin
+	}
+	os.Setenv("PATH", path)
+	if p, err := exec.LookPath("python"); err == nil {
+		logAt(INFO, "Detected .venv in %s; using python: %s", cwd, p)
+	} else if p, err := exec.LookPath("python3"); err == nil {
+		logAt(INFO, "Detected .venv in %s; using python3: %s", cwd, p)
+	} else {
+		logAt(INFO, "Detected .venv in %s; prepended %s to PATH", cwd, venvBin)
+	}
 }
 
 func autoDetectDefaultInterpreter() (string, interpreterKind) {
@@ -1696,6 +1735,7 @@ func main() {
 		os.Exit(2)
 	}
 	setLevel(levelArg)
+	activateVenv()
 
 	// Automatically disable ANSI vars when in DEBUG mode
 	if strings.ToUpper(levelArg) == "DEBUG" {
