@@ -6,13 +6,13 @@
 #
 # After pushing a new Git tag, replace the sha256 below with the SHA-256 of the
 # source archive for that tag, e.g.:
-#   curl -sL https://github.com/berttejeda/bert.validator/archive/refs/tags/v1.2.0.tar.gz | shasum -a 256
+#   curl -sL https://github.com/berttejeda/bert.validator/archive/refs/tags/v1.7.1.tar.gz | shasum -a 256
 
 class BertValidator < Formula
   desc "YAML-driven script validator"
   homepage "https://github.com/berttejeda/bert.validator"
-  url "https://github.com/berttejeda/bert.validator/archive/refs/tags/v1.6.0.tar.gz"
-  sha256 "c9a5cd63173fc86532d0faaee386fae9caaca2d8928a2ab9bdd26842854322b6"
+  url "https://github.com/berttejeda/bert.validator/archive/refs/tags/v1.7.1.tar.gz"
+  sha256 "d5558cd419c8d46bdc958064cb97f963d1ea793866414c025906ec15033512ed"
   license "MIT"
   head "https://github.com/berttejeda/bert.validator.git", branch: "main"
 
