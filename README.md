@@ -36,6 +36,7 @@
 - **Manifest Includes:** Compose manifests by including other YAML files with variable passthrough and optional tag propagation.
 - **Validation Notes:** Attach free-form notes to any validation; notes are rendered with the same template engine and displayed under the validation's summary line.
 - **Validation Summary:** Displays a summary table of all Pass/Fail/Warn/Skip results at the end of execution.
+- **HTML Visualization:** Use `--visualize` to render the validation summary as an interactive HTML mindmap, with a Mermaid pie chart overview.
 
 ## Installation
 
@@ -655,6 +656,7 @@ validator --manifest manifest.yaml --no-summary
 | `--color` | | Define global output color engine: `auto` (default), `always`, or `never`. |
 | `--strict` | | Fail processing immediately if duplicate keys are populated within the manifest template constraints. |
 | `--no-summary` | | Skip printing the validation summary at the end of execution. |
+| `--visualize` | | Generate an HTML mindmap of the validation summary. Bare `--visualize` writes to a temp file and opens it in the default browser; `--visualize=<path.html>` writes to a specific file instead. |
 | `--version` | | Print the framework's version information and exit unconditionally. |
 
 ## Architecture & Walkthrough

@@ -30,7 +30,7 @@ import (
    ========================= */
 
 var (
-	Version   = "1.6.0"
+	Version   = "1.7.0"
 	GitCommit = "dev"
 	BuildDate = "2026-08-11"
 )
@@ -1691,6 +1691,7 @@ func main() {
 	flag.StringVar(&outputMode, "output", "detailed", "Output mode: detailed|compact")
 	flag.Var(&extraVarFlags, "extra-var", "Specify extra variables for config template as key=value pairs (can be specified multiple times)")
 	flag.Var(&extraVarFlags, "e", "Alias for --extra-var")
+	flag.Var(&visualizeOpt, "visualize", "Generate an HTML mindmap of the validation summary; optionally --visualize=<path.html> (default: a temp file, opened automatically)")
 
 	flag.StringVar(&logFile, "log-file", "", "Write captured output to a file")
 	flag.StringVar(&logFileFormat, "log-file-format", "", "Log file format: json|yaml|markdown (auto-detected from --log-file extension by default)")
@@ -1875,6 +1876,19 @@ func main() {
 			colorize(fmt.Sprintf("%d", totalFail), red),
 			colorize(fmt.Sprintf("%d", totalWarn), yellow),
 			colorize(fmt.Sprintf("%d", totalSkip), blue))
+	}
+
+	if visualizeOpt.enabled {
+		if len(ctx.Results) == 0 {
+			logAt(WARN, "Skipping --visualize: no validation results to visualize")
+		} else if outPath, err := generateVisualization(ctx.Results, visualizeOpt.path); err != nil {
+			logAt(ERROR, "Failed to generate visualization: %v", err)
+		} else {
+			logAt(INFO, "%s %s", colorize("Visualization written to:", boldCyan), colorize(outPath, cyan))
+			if err := openInBrowser(outPath); err != nil {
+				logAt(WARN, "Could not auto-open visualization: %v", err)
+			}
+		}
 	}
 
 	if overallRC == 0 {
