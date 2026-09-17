@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 )
@@ -91,6 +92,108 @@ func escapeMindmapText(s string) string {
 	return mindmapTextEscaper.Replace(s)
 }
 
+// safeLinkURLPattern restricts markdown-link targets to schemes that are
+// inert to click (http/https/mailto), rejecting things like javascript: or
+// data: URIs that a hostile validation name/note could otherwise smuggle in.
+var safeLinkURLPattern = regexp.MustCompile(`(?i)^\s*(https?://|mailto:)`)
+
+var urlHTMLEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+)
+
+// escapeMindmapRich is like escapeMindmapText, but preserves the single
+// `[text](url)` Markdown-link form that validation names/notes already
+// support elsewhere in the tool (see linkify/mdPattern in main.go), instead
+// of escaping their brackets into literal text. Everything outside of a
+// recognized link, and the link's own label, still goes through the same
+// full escaping; only http(s)/mailto targets are honored as real links.
+func escapeMindmapRich(s string) string {
+	matches := mdPattern.FindAllStringSubmatchIndex(s, -1)
+	if len(matches) == 0 {
+		return escapeMindmapText(s)
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range matches {
+		fullStart, fullEnd := m[0], m[1]
+		textStart, textEnd := m[2], m[3]
+		urlStart, urlEnd := m[4], m[5]
+		b.WriteString(escapeMindmapText(s[last:fullStart]))
+		url := s[urlStart:urlEnd]
+		if safeLinkURLPattern.MatchString(url) {
+			b.WriteByte('[')
+			b.WriteString(escapeMindmapText(s[textStart:textEnd]))
+			b.WriteString("](")
+			b.WriteString(urlHTMLEscaper.Replace(strings.TrimSpace(url)))
+			b.WriteByte(')')
+		} else {
+			b.WriteString(escapeMindmapText(s[fullStart:fullEnd]))
+		}
+		last = fullEnd
+	}
+	b.WriteString(escapeMindmapText(s[last:]))
+	return b.String()
+}
+
+// outputBlockEscaper is like mindmapTextEscaper, but for multi-line captured
+// stdout/stderr rather than a single-line note: it neutralizes the same
+// Markdown/HTML metacharacters, but turns newlines into literal `<br>` tags
+// instead of collapsing them to a space, since the block renders inside a
+// <pre>. A raw newline can't be used here even though <pre> would normally
+// preserve it: this text sits inline inside a single Markdown list item, and
+// an unindented newline there would be parsed as ending the list item.
+var outputBlockEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	"\\", "\\\\",
+	"*", "\\*",
+	"_", "\\_",
+	"`", "\\`",
+	"[", "\\[",
+	"]", "\\]",
+	"|", "\\|",
+	"\r", "",
+	"\n", "<br>",
+)
+
+// maxOutputChars caps how much of a single stdout/stderr stream is embedded
+// per validation, so one chatty script can't bloat the visualization file.
+const maxOutputChars = 20000
+
+func truncateOutput(s string) string {
+	if len(s) <= maxOutputChars {
+		return s
+	}
+	return s[:maxOutputChars] + "\n… (truncated)"
+}
+
+// buildOutputDetails renders a validation's captured stdout/stderr as a
+// collapsed <details> block so it's available without cluttering the
+// mindmap by default. Returns "" when there's nothing to show.
+func buildOutputDetails(stdout, stderr string) string {
+	stdout, stderr = strings.TrimSpace(stdout), strings.TrimSpace(stderr)
+	if stdout == "" && stderr == "" {
+		return ""
+	}
+	var body strings.Builder
+	if stdout != "" {
+		body.WriteString("<strong>stdout</strong><br>")
+		body.WriteString(outputBlockEscaper.Replace(truncateOutput(stdout)))
+	}
+	if stderr != "" {
+		if body.Len() > 0 {
+			body.WriteString("<br><br>")
+		}
+		body.WriteString("<strong>stderr</strong><br>")
+		body.WriteString(outputBlockEscaper.Replace(truncateOutput(stderr)))
+	}
+	return fmt.Sprintf(` <details class="bv-output"><summary>Output</summary><pre>%s</pre></details>`, body.String())
+}
+
 // buildVisualizationMarkdown renders the validation summary as a Markmap
 // outline: a Mermaid pie chart overview, followed by one top-level branch
 // per outcome (PASS/FAIL/WARN/SKIP) listing its validations.
@@ -141,10 +244,11 @@ func buildVisualizationMarkdown(results []summaryResult) string {
 		}
 		fmt.Fprintf(&b, "## %s %s (%d)\n\n", icons[status], status, len(items))
 		for _, r := range items {
-			fmt.Fprintf(&b, "- **%s** `#%s` `%s` — _%s_\n",
-				escapeMindmapText(r.Name), escapeMindmapText(r.ExecDisplay), r.ValidationID, escapeMindmapText(r.Manifest))
+			fmt.Fprintf(&b, "- **%s** `#%s` `%s` — _%s_%s\n",
+				escapeMindmapRich(r.Name), escapeMindmapText(r.ExecDisplay), r.ValidationID, escapeMindmapText(r.Manifest),
+				buildOutputDetails(r.Stdout, r.Stderr))
 			for _, note := range r.Notes {
-				fmt.Fprintf(&b, "  - %s\n", escapeMindmapText(note))
+				fmt.Fprintf(&b, "  - %s\n", escapeMindmapRich(note))
 			}
 		}
 		b.WriteString("\n")
@@ -191,6 +295,46 @@ body {
 }
 .bv-header strong {
   font-size: 0.95rem;
+}
+/* Mermaid pie legend text inherits primaryTextColor (white, for contrast
+   against colored slices) which disappears against a white/light page
+   background. Outline it so it stays legible on any background. */
+.mermaid .legend text {
+  fill: #fff;
+  paint-order: stroke fill;
+  stroke: #000;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.mermaid .legend rect {
+  stroke: #000;
+  stroke-width: 1px;
+}
+.bv-output {
+  display: inline-block;
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+.bv-output summary {
+  cursor: pointer;
+  color: #0097e6;
+  font-size: 0.85em;
+}
+.bv-output pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 16rem;
+  overflow: auto;
+  margin-top: 0.25rem;
+  padding: 0.5rem;
+  border-radius: 0.35rem;
+  background: #f0f0f0;
+  color: #333;
+  font-size: 0.8em;
+}
+.markmap-dark .bv-output pre {
+  background: #1f1f22;
+  color: #ddd;
 }
 `
 
