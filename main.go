@@ -30,7 +30,7 @@ import (
    ========================= */
 
 var (
-	Version   = "1.7.1"
+	Version   = "1.8.0"
 	GitCommit = "dev"
 	BuildDate = "2026-08-11"
 )
@@ -112,13 +112,21 @@ func logAt(l logLevel, format string, a ...any) {
 	ts := time.Now().Format("15:04:05")
 	msg := fmt.Sprintf(format, a...)
 
+	// --export-as-mop can write its Markdown to stdout; keep diagnostic
+	// logging off of it entirely in that mode so redirecting stdout to a
+	// file always yields clean Markdown.
+	out := io.Writer(os.Stdout)
+	if exportMOP {
+		out = os.Stderr
+	}
+
 	// Guard against ANSI bleed:
 	// - If colors are enabled, reset before timestamp,
 	//   dim timestamp, reset, colorize the level prefix, reset before the message, then reset after.
 	if useColor {
-		fmt.Fprint(os.Stdout, reset+colorize(ts, dim)+" "+colorForLevel(l)+prefix+reset+msg+reset+"\n")
+		fmt.Fprint(out, reset+colorize(ts, dim)+" "+colorForLevel(l)+prefix+reset+msg+reset+"\n")
 	} else {
-		fmt.Fprintf(os.Stdout, ts+" "+prefix+"%s\n", msg)
+		fmt.Fprintf(out, ts+" "+prefix+"%s\n", msg)
 	}
 
 	if logFile != "" {
@@ -392,7 +400,7 @@ func taskSeparator(depth, width int) string {
 }
 
 func printTaskSeparator(depth int) {
-	if compactMode {
+	if compactMode || exportMOP {
 		return
 	}
 	fmt.Println(taskSeparator(depth, 60))
@@ -1692,6 +1700,7 @@ func main() {
 	flag.Var(&extraVarFlags, "extra-var", "Specify extra variables for config template as key=value pairs (can be specified multiple times)")
 	flag.Var(&extraVarFlags, "e", "Alias for --extra-var")
 	flag.Var(&visualizeOpt, "visualize", "Generate an HTML mindmap of the validation summary; optionally --visualize=<path.html> (default: a temp file, opened automatically)")
+	flag.Var(&mopOpt, "export-as-mop", "Convert the finalized manifest (with includes resolved) to a Markdown Method of Procedure, for running the validations by hand; optionally --export-as-mop=<path.md> (default: echoed to stdout)")
 
 	flag.StringVar(&logFile, "log-file", "", "Write captured output to a file")
 	flag.StringVar(&logFileFormat, "log-file-format", "", "Log file format: json|yaml|markdown (auto-detected from --log-file extension by default)")
@@ -1705,6 +1714,8 @@ func main() {
 	flag.Var(&filterTags, "t", "Alias for --tag")
 
 	flag.Parse()
+
+	exportMOP = mopOpt.enabled
 
 	if showVersion {
 		fmt.Printf("validator %s (commit %s, built %s)\n", Version, GitCommit, BuildDate)
@@ -1742,6 +1753,12 @@ func main() {
 	if strings.ToUpper(levelArg) == "DEBUG" {
 		enableAnsiVars = false
 		logAt(DEBUG, "Disabling built-in ANSI color variables because log level is DEBUG")
+	}
+
+	// A Method of Procedure is read and run by a human; the built-in ANSI
+	// color variables are noise there, not something an operator would use.
+	if exportMOP {
+		enableAnsiVars = false
 	}
 
 	// Compile name regex if provided
@@ -1787,6 +1804,17 @@ func main() {
 	}
 
 	overallRC := executeManifest(manifest, nil, 0, ctx)
+
+	if exportMOP {
+		if err := generateMOP(ctx.MOPSteps, manifest, mopOpt.path); err != nil {
+			logAt(ERROR, "Failed to generate MOP: %v", err)
+			os.Exit(1)
+		}
+		if mopOpt.path != "" {
+			logAt(INFO, "%s %s", colorize("Method of Procedure written to:", boldCyan), colorize(mopOpt.path, cyan))
+		}
+		os.Exit(overallRC)
+	}
 
 	if dumpScript || showFilter != "" {
 		maybeWriteLogFile(logFileFormat, ctx.Results)

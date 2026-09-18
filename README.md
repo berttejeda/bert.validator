@@ -37,6 +37,7 @@
 - **Validation Notes:** Attach free-form notes to any validation; notes are rendered with the same template engine and displayed under the validation's summary line.
 - **Validation Summary:** Displays a summary table of all Pass/Fail/Warn/Skip results at the end of execution.
 - **HTML Visualization:** Use `--visualize` to render the validation summary as an interactive HTML mindmap, with a Mermaid pie chart overview.
+- **Method of Procedure Export:** Use `--export-as-mop` to convert the finalized manifest (includes resolved, loops unrolled, templates rendered) into a Markdown runbook, for executing the same steps by hand when `validator` itself isn't available.
 
 ## Installation
 
@@ -657,6 +658,7 @@ validator --manifest manifest.yaml --no-summary
 | `--strict` | | Fail processing immediately if duplicate keys are populated within the manifest template constraints. |
 | `--no-summary` | | Skip printing the validation summary at the end of execution. |
 | `--visualize` | | Generate an HTML mindmap of the validation summary. Bare `--visualize` writes to a temp file and opens it in the default browser; `--visualize=<path.html>` writes to a specific file instead. |
+| `--export-as-mop` | | Convert the finalized manifest (with includes resolved) to a Markdown Method of Procedure, without running anything. Bare `--export-as-mop` echoes the Markdown to stdout; `--export-as-mop=<path.md>` writes it to a file instead. |
 | `--version` | | Print the framework's version information and exit unconditionally. |
 
 ## Architecture & Walkthrough

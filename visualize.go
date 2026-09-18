@@ -38,16 +38,18 @@ var (
 	vendoredMarkmapToolbarCSS []byte
 )
 
-// visualizeFlag implements flag.Value with an optional value, so both
-// `--visualize` (ephemeral temp file) and `--visualize=path.html` work.
-type visualizeFlag struct {
+// optionalPathFlag implements flag.Value for a flag that's a plain on/off
+// switch by default but can also take an explicit path, so both bare
+// `--visualize` (ephemeral temp file) and `--visualize=path.html` work; the
+// same type backs `--export-as-mop`.
+type optionalPathFlag struct {
 	enabled bool
 	path    string
 }
 
-func (v *visualizeFlag) String() string { return v.path }
+func (v *optionalPathFlag) String() string { return v.path }
 
-func (v *visualizeFlag) Set(s string) error {
+func (v *optionalPathFlag) Set(s string) error {
 	switch s {
 	case "false":
 		v.enabled = false
@@ -63,9 +65,9 @@ func (v *visualizeFlag) Set(s string) error {
 
 // IsBoolFlag tells the flag package this flag doesn't require an explicit
 // value, matching how --extra-var-style flags differ from boolean ones.
-func (v *visualizeFlag) IsBoolFlag() bool { return true }
+func (v *optionalPathFlag) IsBoolFlag() bool { return true }
 
-var visualizeOpt visualizeFlag
+var visualizeOpt optionalPathFlag
 
 // mindmapTextEscaper neutralizes Markdown syntax and HTML metacharacters in
 // dynamic content (validation names, notes, manifest paths) before it's
