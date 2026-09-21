@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -196,6 +197,15 @@ func buildOutputDetails(stdout, stderr string) string {
 	return fmt.Sprintf(` <details class="bv-output"><summary>Output</summary><pre>%s</pre></details>`, body.String())
 }
 
+// statusColors keeps each outcome's color consistent across the mindmap
+// branches and the pie chart: PASS green, FAIL red, WARN yellow, SKIP blue.
+var statusColors = map[string]string{
+	"PASS": "#2e9e44",
+	"FAIL": "#e03131",
+	"WARN": "#f5b700",
+	"SKIP": "#4a90d9",
+}
+
 // buildVisualizationMarkdown renders the validation summary as a Markmap
 // outline: a Mermaid pie chart overview, followed by one top-level branch
 // per outcome (PASS/FAIL/WARN/SKIP) listing its validations.
@@ -210,10 +220,34 @@ func buildVisualizationMarkdown(results []summaryResult) string {
 		counts[r.Status]++
 	}
 
+	// Markmap assigns branch colors in first-seen order: the root, then each
+	// depth-1 branch (colorFreezeLevel: 2). Branches are emitted below as
+	// Overview, then each non-empty status in `order`.
+	branchColors := []string{"#4a90d9", "#888888"}
+	for _, status := range order {
+		if counts[status] > 0 {
+			branchColors = append(branchColors, statusColors[status])
+		}
+	}
+
+	// Mermaid pies assign pie1, pie2, ... to slices sorted by descending
+	// value (ties keep input order), so pin each status's color by that rank.
+	pieOrder := make([]string, 0, len(order))
+	for _, status := range order {
+		if counts[status] > 0 {
+			pieOrder = append(pieOrder, status)
+		}
+	}
+	sort.SliceStable(pieOrder, func(i, j int) bool { return counts[pieOrder[i]] > counts[pieOrder[j]] })
+
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.WriteString("markmap:\n")
 	b.WriteString("  colorFreezeLevel: 2\n")
+	b.WriteString("  color:\n")
+	for _, c := range branchColors {
+		fmt.Fprintf(&b, "    - '%s'\n", c)
+	}
 	b.WriteString("  mermaid:\n")
 	b.WriteString("    theme: base\n")
 	b.WriteString("    themeVariables:\n")
@@ -221,6 +255,9 @@ func buildVisualizationMarkdown(results []summaryResult) string {
 	b.WriteString("      primaryTextColor: '#fff'\n")
 	b.WriteString("      primaryBorderColor: '#2d6cb4'\n")
 	b.WriteString("      lineColor: '#888'\n")
+	for i, status := range pieOrder {
+		fmt.Fprintf(&b, "      pie%d: '%s'\n", i+1, statusColors[status])
+	}
 	b.WriteString("---\n\n")
 	b.WriteString("# bert.validator — Validation Summary\n\n")
 

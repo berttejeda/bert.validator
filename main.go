@@ -30,7 +30,7 @@ import (
    ========================= */
 
 var (
-	Version   = "1.8.0"
+	Version   = "1.8.1"
 	GitCommit = "dev"
 	BuildDate = "2026-08-11"
 )
