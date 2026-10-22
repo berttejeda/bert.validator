@@ -35,8 +35,9 @@
 - **Loop Iterations:** Execute a validation multiple times with per-iteration variable overrides and loop-level tag filtering (`-t tag@loop_tag`).
 - **Manifest Includes:** Compose manifests by including other YAML files with variable passthrough and optional tag propagation.
 - **Validation Notes:** Attach free-form notes to any validation; notes are rendered with the same template engine and displayed under the validation's summary line.
+- **Manifest Title & Description:** Give a manifest an optional `title` and `description`; they head the CLI output, the `--visualize` page, `--export-as-mop` documents and log files (see [Manifest Syntax](#manifest-syntax)).
 - **Validation Summary:** Displays a summary table of all Pass/Fail/Warn/Skip results at the end of execution.
-- **HTML Visualization:** Use `--visualize` to render the validation summary as an interactive HTML mindmap, with a Mermaid pie chart overview.
+- **HTML Visualization:** Use `--visualize` to render the validation summary as an interactive HTML mindmap, with a Mermaid pie chart overview. The manifest `title` labels the root node and a header card shows the title and description. Each validation carries a clickable status chip that reads "Needs Review" (amber) and switches to "Reviewed" (green) when clicked; validations that passed start out as "Reviewed", and selections are kept while you fold and unfold branches (they are not saved between page loads).
 - **Method of Procedure Export:** Use `--export-as-mop` to convert the finalized manifest (includes resolved, loops unrolled, templates rendered) into a Markdown runbook, for executing the same steps by hand when `validator` itself isn't available.
 
 ## Installation
@@ -111,9 +112,21 @@ validator --manifest manifest.yaml --dump-script
 
 ## Manifest Syntax
 
+The optional top-level `title` (a single line) and `description` (free-form, may span several lines and use `[text](url)` links) are purely descriptive and never affect execution. Both are template-rendered, so `title: "{{ .app_name }} checks"` works. Only the manifest passed on the command line is used; included manifests' titles are ignored. They are shown:
+
+- at the top of a run and of `--list` (bold title, dimmed description), and as a title line in the final summary;
+- in the `--visualize` page: the title labels the mindmap's root node and the page `<title>`, and a header card shows the title and description;
+- in `--export-as-mop` output: the title becomes the document heading and the description a blockquote beneath it;
+- in `--log-file` output (`title` / `description` keys in JSON and YAML, a heading and blockquote in Markdown).
+
 A basic `manifest.yaml` looks like this:
 
 ```yaml
+# Optional: a human-readable title and description for the manifest
+title: Sample Manifest Title
+description: |-
+  A sample validation manifest
+
 # Define variables available to the template engine
 templateVars:
   app_name: "MyApp"
@@ -549,6 +562,7 @@ After all validations complete, a summary table is printed showing the result of
 
 ```
 --- Validation Summary ---
+Sample Manifest Title
 ✅ Validation #1    [a1b2c3d4] Check File Exists              [PASS]
 ⚠️ Validation #2    [e5f6a7b8] Check Config                   [WARN]
 ❌ Validation #3    [c9d0e1f2] Check Service                   [FAIL]
@@ -556,6 +570,8 @@ After all validations complete, a summary table is printed showing the result of
 
 Total: 4 (Pass: 1, Fail: 1, Warn: 1, Skip: 1)
 ```
+
+The manifest's `title` (if set) is shown under the summary heading; the `description` is shown once, in the banner at the start of the run.
 
 Each line shows:
 - **Status icon** — ✅ PASS, ⚠️ WARN, ❌ FAIL, or ⏭️ SKIP.
@@ -657,6 +673,9 @@ validator --manifest manifest.yaml --no-summary
 | `--color` | | Define global output color engine: `auto` (default), `always`, or `never`. |
 | `--strict` | | Fail processing immediately if duplicate keys are populated within the manifest template constraints. |
 | `--no-summary` | | Skip printing the validation summary at the end of execution. |
+| `--output` | | Output mode: `detailed` (default) or `compact`. |
+| `--log-file` | | Write captured log messages and results to a file. The format is picked from the extension (`.json`, `.yaml`/`.yml`, `.md`/`.markdown`) unless `--log-file-format` is given. If the manifest has a `title`/`description`, they are included. |
+| `--log-file-format` | | Log file format: `json`, `yaml` or `markdown`. |
 | `--visualize` | | Generate an HTML mindmap of the validation summary. Bare `--visualize` writes to a temp file and opens it in the default browser; `--visualize=<path.html>` writes to a specific file instead. |
 | `--export-as-mop` | | Convert the finalized manifest (with includes resolved) to a Markdown Method of Procedure, without running anything. Bare `--export-as-mop` echoes the Markdown to stdout; `--export-as-mop=<path.md>` writes it to a file instead. |
 | `--version` | | Print the framework's version information and exit unconditionally. |

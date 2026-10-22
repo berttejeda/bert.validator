@@ -10,13 +10,18 @@ This document provides a high-level overview of the `bert.validator` codebase.
 
 ```
 bert.validator/
-├── main.go               # CLI entry point, manifest parsing, templating, script execution
+├── main.go               # CLI entry point, manifest parsing, templating, script execution, summary/log output
 ├── runner_includes.go    # Recursive manifest execution, condition evaluation, summary tracking
+├── visualize.go          # --visualize: HTML mindmap (Markmap + Mermaid) of the summary
+├── mop.go                # --export-as-mop: Markdown Method of Procedure
+├── assets/markmap/       # Vendored, embedded browser assets (d3, markmap) for --visualize
 ├── console_posix.go      # No-op ANSI stub for Unix/macOS
 ├── console_windows.go    # Windows Virtual Terminal Processing enablement
 ├── go.mod / go.sum       # Module definition and dependency lock
 ├── manifest.yaml         # Example manifest
-└── other-manifest.yaml   # Example included manifest
+├── other-manifest.yaml   # Example included manifest
+├── README.md             # User documentation
+└── CHANGELOG.md          # Release history
 ```
 
 ## Key Components
@@ -33,6 +38,8 @@ Contains the CLI entry point (`main()`), all manifest/YAML parsing logic, interp
     *   `InterpreterPath` / `InterpreterFlags` — Default shell and flags.
     *   `EnvOnly` — If `true`, pass variables via environment instead of inline shell assignments.
     *   `ShowOutput` / `ShowOutputSet` — Default output streaming behavior.
+*   **`manifestMeta`** — The optional top-level `title` and `description` (purely descriptive; never affects execution). Parsed by `parseManifestMeta()` from the *rendered* YAML, so both support templating. The root manifest's value is stored in the package-level `rootMeta` (set once, at depth 0, in `executeManifest`; included manifests don't override it).
+*   **`logFileReport`** — The JSON/YAML `--log-file` document: `title`, `description` (omitted when empty), `logs`, `results`.
 *   **`functionDef`** — A single reusable function (`name` + `source`).
 *   **`functionsMap`** — `map[string][]functionDef` keyed by interpreter base name (e.g., `bash`, `zsh`, `powershell`).
 *   **`loopItem`** — A single loop iteration: `Name` (string), `Vars` (map), `Tags` ([]string).
@@ -54,11 +61,11 @@ Contains the CLI entry point (`main()`), all manifest/YAML parsing logic, interp
 #### Core Functions
 
 1.  **`main()`**
-    *   Parses CLI flags (`--manifest`, `--log-level`, `-e`, `-n`, `-t`, `--list`, `--show`, `--dump-script`, `--strict`, `--no-summary`, `--color`, `--ansi-vars`, `--version`).
+    *   Parses CLI flags (`--manifest`, `--log-level`, `-e`, `-n`, `-t`, `--list`, `--show`, `--dump-script`, `--strict`, `--no-summary`, `--color`, `--output`, `--ansi-vars`, `--log-file`, `--log-file-format`, `--visualize`, `--export-as-mop`, `--version`).
     *   Resolves color mode and enables Windows VT if needed.
     *   Parses `--extra-var` values (supports JSON object strings).
     *   Builds a `runContext` and delegates to `listManifestValidations()` or `executeManifest()`.
-    *   Prints the validation summary table and exits with `0` (all pass) or `1` (any failure).
+    *   Prints the validation summary table (headed by the manifest title, if any), then optionally writes the `--visualize` page, and exits with `0` (all pass) or `1` (any failure). With `--export-as-mop` it instead writes the Method of Procedure and exits.
 
 2.  **`loadManifest(path string) (*manifestData, error)`**
     *   Reads the manifest from local filesystem, HTTP/HTTPS URL, or stdin (`-`).
@@ -68,6 +75,8 @@ Contains the CLI entry point (`main()`), all manifest/YAML parsing logic, interp
     *   Extracts top-level keys: `defaults`, `functions`, `vars`, `validations`.
     *   Warns on duplicate keys (fails in `--strict` mode).
     *   Parses each validation item into the `validation` struct, including outcomes, conditions, includes, and per-validation interpreter/var overrides.
+
+    *   Top-level `title` / `description` are read separately by `parseManifestMeta()` rather than returned from `parseManifest`.
 
 4.  **`autoDetectDefaultInterpreter() (string, interpreterKind)`**
     *   Platform-aware shell detection: tries Homebrew bash, system bash, zsh, sh on macOS; bash/zsh/sh on Linux; pwsh/powershell/cmd on Windows.
@@ -91,13 +100,19 @@ Contains the CLI entry point (`main()`), all manifest/YAML parsing logic, interp
 9.  **`startProgress(name string) func()`**
     *   Returns a stop callback. On TTYs, displays an animated spinner with elapsed time. On non-TTYs or in DEBUG mode, prints simple start/finish lines.
 
+#### Title & Description Output
+
+*   **`parseManifestMeta(root *yaml.Node) manifestMeta`** — Reads `title` (whitespace collapsed to one line) and `description` (trimmed, newlines kept).
+*   **`printManifestBanner(m manifestMeta)`** — Prints a bold title and dimmed, indented description (links made clickable by `linkify`). Called at the start of a run (`executeManifest`, depth 0, not for `--dump-script`/`--show`/MOP) and under the `--list` heading.
+*   The same metadata feeds the summary heading, `--log-file` output (`writeLogFile` / `writeMarkdownLog`), `--export-as-mop` and `--visualize`, so a manifest's identity appears consistently everywhere.
+
 ### `runner_includes.go`
 
 Contains the recursive execution engine and supporting logic that orchestrates validation runs across manifest trees.
 
 #### Data Structures
 
-*   **`summaryResult`** — Tracks per-validation outcome: `ExecDisplay`, `ValidationID`, `Name`, `Status` (PASS/FAIL/WARN/SKIP).
+*   **`summaryResult`** — Tracks per-validation outcome: `Manifest`, `ExecDisplay`, `ValidationID`, `Name`, `Status` (PASS/FAIL/WARN/SKIP), `Notes`, and captured `Stdout`/`Stderr` (used by `--visualize`).
 *   **`runContext`** — Shared execution context threaded through recursive calls:
     *   `NameRe` — Compiled regex for `--name` filtering.
     *   `FilterTags` — Active tag filters from `--tag`.
@@ -105,6 +120,7 @@ Contains the recursive execution engine and supporting logic that orchestrates v
     *   `ExecPrefix` — Hierarchical numbering prefix (e.g., `1.`, `1.2.`).
     *   `ShowFilter` — Active `--show` filter string.
     *   `Results` — Accumulated summary results (mutex-protected).
+    *   `MOPSteps` — Steps collected for `--export-as-mop` (mutex-protected).
 
 #### Core Functions
 
@@ -142,6 +158,20 @@ Contains the recursive execution engine and supporting logic that orchestrates v
 7.  **`matchesShowFilter(filter, validationID, name string) bool`**
     *   Matches a `--show` filter against validation ID or name (case-insensitive substring or regex).
 
+### `visualize.go`
+
+Implements `--visualize`. Everything needed to render is embedded in the binary (`go:embed` of `assets/markmap/*`), so no Node.js or network access is required; only the Mermaid pie chart is fetched from a CDN and degrades gracefully offline.
+
+*   **`optionalPathFlag`** — A flag that works both bare (`--visualize`) and with a value (`--visualize=path.html`); also backs `--export-as-mop`.
+*   **`buildVisualizationMarkdown(results, meta)`** — Renders the results as a Markmap outline: a Mermaid pie overview, then one branch per outcome. The manifest title labels the root node. Branch and pie colors are pinned per status (`statusColors`). All dynamic text goes through `escapeMindmapText` / `escapeMindmapRich` because manifests may come from untrusted URLs and the renderer allows inline HTML.
+*   **`reviewPill()`** — Emits each validation's "Needs Review" / "Reviewed" toggle as inline HTML (a styled checkbox inside a label; the text is CSS `::after` content). Emitting HTML rather than a Markdown task-list item lets Markmap measure the node at its true width. PASS entries are rendered pre-checked.
+*   **`buildVisualizationHTML(markdown, meta)`** — Assembles the single-file page: inlined d3/markmap scripts, CSS (including the `.bv-pill` styles with light/dark variants), the header card from **`buildVisualizationHeader`** (title + description, escaped via `htmlEscapeRich`, which only honors http/https/mailto links), and the bootstrap script. `keepReviewState` reapplies the reader's toggle choices after Markmap re-renders nodes (fold/unfold); state is in-memory only.
+*   **`generateVisualization(results, outPath, meta)`** / **`openInBrowser`** — Write to a path or a temp file, then open with the OS default handler.
+
+### `mop.go`
+
+Implements `--export-as-mop`: the manifest walk collects `mopStep`s (rendered script, expected outcomes, notes) instead of executing, and `buildMOPMarkdown(steps, source, meta)` renders them as a Markdown runbook in execution order. Conditions are kept as informational text rather than evaluated, and `init` entries are included as prerequisite steps. A manifest title becomes the document heading, with the description as a blockquote (`mdBlockquote`). While exporting, log output is sent to stderr (`mopSafePrintf`) so stdout is clean Markdown.
+
 ### `console_posix.go` / `console_windows.go`
 
 Platform-specific terminal initialization via build tags.
@@ -166,7 +196,8 @@ Platform-specific terminal initialization via build tags.
 ├─────────────────────────────────────────────────────────────┤
 │ 4. Second-pass Parsing (parseManifest)                      │
 │    Unmarshal rendered YAML → extract defaults, functions,   │
-│    global vars, and validations into Go structs             │
+│    global vars, and validations into Go structs;            │
+│    title/description via parseManifestMeta (root manifest)  │
 ├─────────────────────────────────────────────────────────────┤
 │ 5. Validation Loop (executeManifest)                        │
 │    For each validation:                                     │
@@ -188,6 +219,7 @@ Platform-specific terminal initialization via build tags.
 ├─────────────────────────────────────────────────────────────┤
 │ 6. Summary & Exit                                           │
 │    Print summary table (unless --no-summary)                │
+│    Optionally write --visualize page / --log-file           │
 │    Exit 0 if all pass, 1 if any fail                        │
 └─────────────────────────────────────────────────────────────┘
 ```

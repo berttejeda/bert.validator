@@ -30,7 +30,7 @@ import (
    ========================= */
 
 var (
-	Version   = "1.8.1"
+	Version   = "1.9.0"
 	GitCommit = "dev"
 	BuildDate = "2026-08-11"
 )
@@ -151,8 +151,10 @@ func detectLogFormat(path, explicit string) string {
 }
 
 type logFileReport struct {
-	Logs    []logRecord     `json:"logs" yaml:"logs"`
-	Results []summaryResult `json:"results" yaml:"results"`
+	Title       string          `json:"title,omitempty" yaml:"title,omitempty"`
+	Description string          `json:"description,omitempty" yaml:"description,omitempty"`
+	Logs        []logRecord     `json:"logs" yaml:"logs"`
+	Results     []summaryResult `json:"results" yaml:"results"`
 }
 
 func writeLogFile(path, format string, results []summaryResult) error {
@@ -171,11 +173,11 @@ func writeLogFile(path, format string, results []summaryResult) error {
 	case "json":
 		enc := json.NewEncoder(f)
 		enc.SetIndent("", "  ")
-		return enc.Encode(logFileReport{Logs: logRecords, Results: results})
+		return enc.Encode(logFileReport{Title: rootMeta.Title, Description: rootMeta.Description, Logs: logRecords, Results: results})
 	case "yaml":
 		enc := yaml.NewEncoder(f)
 		defer enc.Close()
-		return enc.Encode(logFileReport{Logs: logRecords, Results: results})
+		return enc.Encode(logFileReport{Title: rootMeta.Title, Description: rootMeta.Description, Logs: logRecords, Results: results})
 	case "markdown":
 		return writeMarkdownLog(f, results)
 	default:
@@ -186,6 +188,12 @@ func writeLogFile(path, format string, results []summaryResult) error {
 func writeMarkdownLog(w io.Writer, results []summaryResult) error {
 	fmt.Fprintln(w, "# Validation Log")
 	fmt.Fprintln(w)
+	if rootMeta.Title != "" {
+		fmt.Fprintf(w, "**%s**\n\n", escapeMindmapText(rootMeta.Title))
+	}
+	if rootMeta.Description != "" {
+		fmt.Fprintf(w, "%s\n\n", mdBlockquote(rootMeta.Description))
+	}
 	fmt.Fprintln(w, "## Messages")
 	fmt.Fprintln(w)
 	for _, r := range logRecords {
@@ -893,6 +901,48 @@ type validation struct {
 	Includes         []includeBlock
 	Loop             []loopItem
 	Notes            []string
+}
+
+// manifestMeta is the optional, purely descriptive top-level `title` and
+// `description` of the root manifest. It never affects execution; it is
+// surfaced in the CLI, the log file, --visualize and --export-as-mop.
+type manifestMeta struct {
+	Title       string
+	Description string
+}
+
+// rootMeta holds the metadata of the manifest passed on the command line
+// (included manifests don't override it). It is set once, at depth 0.
+var rootMeta manifestMeta
+
+// parseManifestMeta reads `title` (collapsed to a single line) and
+// `description` (trimmed, newlines preserved) from the top-level mapping.
+func parseManifestMeta(root *yaml.Node) manifestMeta {
+	if root == nil || root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return manifestMeta{}
+	}
+	top := root.Content[0]
+	return manifestMeta{
+		Title:       strings.Join(strings.Fields(toString(getMapValue(top, "title"))), " "),
+		Description: strings.TrimSpace(toString(getMapValue(top, "description"))),
+	}
+}
+
+// printManifestBanner prints the manifest's title and description at the top
+// of a run (or a --list), so it's clear what is about to be validated.
+func printManifestBanner(m manifestMeta) {
+	if m.Title == "" && m.Description == "" {
+		return
+	}
+	if m.Title != "" {
+		fmt.Println(colorize(linkify(m.Title), boldWhite))
+	}
+	if m.Description != "" {
+		for _, line := range strings.Split(m.Description, "\n") {
+			fmt.Printf("  %s\n", colorize(linkify(strings.TrimRight(line, " \t\r")), dim))
+		}
+	}
+	fmt.Println()
 }
 
 func computeValidationID(execNumber int, name string) string {
@@ -1806,7 +1856,7 @@ func main() {
 	overallRC := executeManifest(manifest, nil, 0, ctx)
 
 	if exportMOP {
-		if err := generateMOP(ctx.MOPSteps, manifest, mopOpt.path); err != nil {
+		if err := generateMOP(ctx.MOPSteps, manifest, mopOpt.path, rootMeta); err != nil {
 			logAt(ERROR, "Failed to generate MOP: %v", err)
 			os.Exit(1)
 		}
@@ -1823,6 +1873,9 @@ func main() {
 
 	if !noSummary && len(ctx.Results) > 0 {
 		fmt.Printf("\n%s\n", colorize("--- Validation Summary ---", boldCyan))
+		if rootMeta.Title != "" {
+			fmt.Println(colorize(linkify(rootMeta.Title), boldWhite))
+		}
 		statusColor := map[string]string{
 			"PASS": green,
 			"FAIL": red,
@@ -1909,7 +1962,7 @@ func main() {
 	if visualizeOpt.enabled {
 		if len(ctx.Results) == 0 {
 			logAt(WARN, "Skipping --visualize: no validation results to visualize")
-		} else if outPath, err := generateVisualization(ctx.Results, visualizeOpt.path); err != nil {
+		} else if outPath, err := generateVisualization(ctx.Results, visualizeOpt.path, rootMeta); err != nil {
 			logAt(ERROR, "Failed to generate visualization: %v", err)
 		} else {
 			logAt(INFO, "%s %s", colorize("Visualization written to:", boldCyan), colorize(outPath, cyan))

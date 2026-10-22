@@ -1,3 +1,7 @@
+title: Sample Manifest Title
+description: |-
+  A sample validation manifest
+
 # Define variables available to the template engine
 templateVars:
   app_name: "MyApp"

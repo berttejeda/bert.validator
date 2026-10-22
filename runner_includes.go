@@ -198,6 +198,7 @@ func listManifestValidations(manifestPath string, includeVars map[string]any, de
 	prefix := strings.Repeat("  ", depth)
 	if depth == 0 {
 		fmt.Printf("%s\n", colorize("--- Validation List ---", boldCyan))
+		printManifestBanner(parseManifestMeta(&root))
 	}
 
 	for _, v := range validations {
@@ -310,8 +311,13 @@ func executeManifest(manifestPath string, includeVars map[string]any, depth int,
 		return 2
 	}
 
+	if depth == 0 {
+		rootMeta = parseManifestMeta(&root)
+	}
+
 	autoInterp, autoKind := autoDetectDefaultInterpreter()
 	if !dumpScript && !exportMOP && ctx.ShowFilter == "" && depth == 0 {
+		printManifestBanner(rootMeta)
 		logAt(INFO, "Using auto-detected default interpreter: %s", autoInterp)
 		logAt(INFO, "Found %d validation(s) to run.", len(validations))
 		printTaskSeparator(depth)

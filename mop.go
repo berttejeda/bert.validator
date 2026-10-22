@@ -110,11 +110,36 @@ func codeCsv(codes []int) string {
 	return strings.Join(parts, ", ")
 }
 
+// mdBlockquote renders free-form text as an escaped Markdown blockquote,
+// keeping its line and paragraph breaks.
+func mdBlockquote(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i, l := range lines {
+		l = strings.TrimRight(l, " \t\r")
+		if l == "" {
+			lines[i] = ">"
+		} else {
+			lines[i] = "> " + escapeMindmapRich(l)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // buildMOPMarkdown renders the collected steps as a standalone Markdown
-// Method of Procedure, in the exact order they'd execute in.
-func buildMOPMarkdown(steps []mopStep, sourceManifest string) string {
+// Method of Procedure, in the exact order they'd execute in. When the
+// manifest has a title it becomes the document heading (with "Method of
+// Procedure" as the subtitle) and the description follows as a blockquote.
+func buildMOPMarkdown(steps []mopStep, sourceManifest string, meta manifestMeta) string {
 	var b strings.Builder
-	b.WriteString("# Method of Procedure\n\n")
+	if meta.Title != "" {
+		fmt.Fprintf(&b, "# %s\n\n_Method of Procedure_\n\n", escapeMindmapRich(meta.Title))
+	} else {
+		b.WriteString("# Method of Procedure\n\n")
+	}
+	if meta.Description != "" {
+		b.WriteString(mdBlockquote(meta.Description))
+		b.WriteString("\n\n")
+	}
 	fmt.Fprintf(&b, "- **Source manifest:** `%s`\n", escapeMindmapText(sourceManifest))
 	fmt.Fprintf(&b, "- **Generated:** %s by bert.validator %s\n\n", time.Now().Format("2006-01-02 15:04:05"), Version)
 	b.WriteString("This document lists the steps `validator` would run for the manifest above, " +
@@ -215,8 +240,8 @@ func buildMOPMarkdown(steps []mopStep, sourceManifest string) string {
 
 // generateMOP renders the collected steps and writes them to outPath, or to
 // stdout when outPath is empty.
-func generateMOP(steps []mopStep, sourceManifest, outPath string) error {
-	markdown := buildMOPMarkdown(steps, sourceManifest)
+func generateMOP(steps []mopStep, sourceManifest, outPath string, meta manifestMeta) error {
+	markdown := buildMOPMarkdown(steps, sourceManifest, meta)
 	if outPath == "" {
 		_, err := fmt.Print(markdown)
 		return err

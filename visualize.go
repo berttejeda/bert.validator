@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -206,10 +207,25 @@ var statusColors = map[string]string{
 	"SKIP": "#4a90d9",
 }
 
+// reviewPill renders the clickable "Needs Review" / "Reviewed" toggle for one
+// validation as inline HTML (the markdown-it renderer runs with `html: true`).
+// It is a real checkbox styled as a pill (see .bv-pill in the CSS), so the
+// label text switches in CSS and no extra markup is needed per state. Emitting
+// it as HTML rather than a Markdown task-list item lets markmap measure the
+// node at its true width. data-key identifies the item for state restore.
+func reviewPill(r summaryResult, checked string) string {
+	return fmt.Sprintf(`<label class="bv-pill"><input type="checkbox" class="bv-review" data-key="%s"%s><span></span></label>`,
+		html.EscapeString(r.ExecDisplay+"|"+r.ValidationID), checked)
+}
+
 // buildVisualizationMarkdown renders the validation summary as a Markmap
 // outline: a Mermaid pie chart overview, followed by one top-level branch
 // per outcome (PASS/FAIL/WARN/SKIP) listing its validations.
-func buildVisualizationMarkdown(results []summaryResult) string {
+//
+// The manifest title, when set, labels the root node in place of the generic
+// heading; the description is shown in the page header (see
+// buildVisualizationHTML) so it stays visible without adding a branch.
+func buildVisualizationMarkdown(results []summaryResult, meta manifestMeta) string {
 	order := []string{"PASS", "FAIL", "WARN", "SKIP"}
 	icons := map[string]string{"PASS": "✅", "FAIL": "❌", "WARN": "⚠️", "SKIP": "⏭️"}
 
@@ -259,7 +275,11 @@ func buildVisualizationMarkdown(results []summaryResult) string {
 		fmt.Fprintf(&b, "      pie%d: '%s'\n", i+1, statusColors[status])
 	}
 	b.WriteString("---\n\n")
-	b.WriteString("# bert.validator — Validation Summary\n\n")
+	if meta.Title != "" {
+		fmt.Fprintf(&b, "# %s\n\n", escapeMindmapText(meta.Title))
+	} else {
+		b.WriteString("# bert.validator — Validation Summary\n\n")
+	}
 
 	if len(results) == 0 {
 		b.WriteString("_No validation results were recorded for this run._\n")
@@ -282,9 +302,15 @@ func buildVisualizationMarkdown(results []summaryResult) string {
 			continue
 		}
 		fmt.Fprintf(&b, "## %s %s (%d)\n\n", icons[status], status, len(items))
+		// Passed validations start out "Reviewed"; everything else "Needs
+		// Review" until the reader clicks it.
+		checked := ""
+		if status == "PASS" {
+			checked = " checked"
+		}
 		for _, r := range items {
-			fmt.Fprintf(&b, "- **%s** `#%s` `%s` — _%s_%s\n",
-				escapeMindmapRich(r.Name), escapeMindmapText(r.ExecDisplay), r.ValidationID, escapeMindmapText(r.Manifest),
+			fmt.Fprintf(&b, "- %s **%s** `#%s` `%s` — _%s_%s\n",
+				reviewPill(r, checked), escapeMindmapRich(r.Name), escapeMindmapText(r.ExecDisplay), r.ValidationID, escapeMindmapText(r.Manifest),
 				buildOutputDetails(r.Stdout, r.Stderr))
 			for _, note := range r.Notes {
 				fmt.Fprintf(&b, "  - %s\n", escapeMindmapRich(note))
@@ -326,7 +352,7 @@ body {
   background: rgba(255, 255, 255, 0.85);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
   font-size: 0.85rem;
-  pointer-events: none;
+  max-width: min(28rem, calc(100vw - 1.5rem));
 }
 .markmap-dark .bv-header {
   background: rgba(39, 39, 42, 0.85);
@@ -334,6 +360,22 @@ body {
 }
 .bv-header strong {
   font-size: 0.95rem;
+}
+.bv-header .bv-sub {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+.bv-header .bv-desc {
+  margin-top: 0.4rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid rgba(128, 128, 128, 0.35);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  max-height: 30vh;
+  overflow: auto;
+}
+.bv-header a {
+  color: #0097e6;
 }
 /* Mermaid pie legend text inherits primaryTextColor (white, for contrast
    against colored slices) which disappears against a white/light page
@@ -348,6 +390,86 @@ body {
 .mermaid .legend rect {
   stroke: #000;
   stroke-width: 1px;
+}
+/* Review toggle: a soft amber chip with a dot for "Needs Review", turning into
+   a soft green chip with a check for "Reviewed". The min-width fits the longer
+   label so toggling never changes the node's measured width. */
+.bv-pill {
+  display: inline-block;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+  cursor: pointer;
+  user-select: none;
+}
+.bv-pill input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.bv-pill span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4em;
+  box-sizing: border-box;
+  min-width: 9.5em;
+  padding: 0.15em 0.8em 0.15em 0.65em;
+  border: 1px solid #f3d38b;
+  border-radius: 999px;
+  background: #fff7e0;
+  color: #8a5a00;
+  font-size: 0.78em;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.bv-pill span::before {
+  content: '';
+  width: 0.55em;
+  height: 0.55em;
+  border-radius: 50%;
+  background: currentColor;
+}
+.bv-pill span::after {
+  content: 'Needs Review';
+}
+.bv-pill:hover span {
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+}
+.bv-pill input:focus-visible + span {
+  outline: 2px solid #4a90d9;
+  outline-offset: 2px;
+}
+.bv-pill input:checked + span {
+  border-color: #a7dfb4;
+  background: #e8f7ec;
+  color: #17692c;
+}
+.bv-pill input:checked + span::before {
+  content: '\2713';
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: none;
+  font-size: 1.05em;
+  line-height: 1;
+}
+.bv-pill input:checked + span::after {
+  content: 'Reviewed';
+}
+.markmap-dark .bv-pill span {
+  border-color: rgba(243, 190, 80, 0.45);
+  background: rgba(243, 190, 80, 0.16);
+  color: #f6c862;
+  box-shadow: none;
+}
+.markmap-dark .bv-pill input:checked + span {
+  border-color: rgba(76, 190, 105, 0.45);
+  background: rgba(76, 190, 105, 0.16);
+  color: #6fd58a;
 }
 .bv-output {
   display: inline-block;
@@ -390,9 +512,30 @@ const visualizationBootstrapJS = `(function () {
   }
   var assets = transformer.getUsedAssets(features);
 
+  // markmap rewrites node content on re-render (e.g. fold/unfold), which
+  // recreates each review toggle in its initial state. Remember what the
+  // reader chose, keyed by data-key, and reapply it after every re-render.
+  function keepReviewState(svgEl) {
+    var states = Object.create(null);
+    svgEl.addEventListener('change', function (e) {
+      var box = e.target;
+      if (box && box.classList && box.classList.contains('bv-review')) {
+        states[box.dataset.key] = box.checked;
+      }
+    });
+    function restore() {
+      svgEl.querySelectorAll('input.bv-review').forEach(function (box) {
+        var key = box.dataset.key;
+        if (key in states && box.checked !== states[key]) box.checked = states[key];
+      });
+    }
+    new MutationObserver(restore).observe(svgEl, { childList: true, subtree: true });
+  }
+
   function renderMindmap() {
     var mm = markmap.Markmap.create('svg#mindmap', markmap.deriveOptions(jsonOptions), root);
     window.mm = mm;
+    keepReviewState(document.getElementById('mindmap'));
     if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
       document.documentElement.classList.add('markmap-dark');
     }
@@ -418,11 +561,54 @@ const visualizationBootstrapJS = `(function () {
 })();
 `
 
+// htmlEscapeRich HTML-escapes s but keeps `[text](url)` links (http, https
+// and mailto only), matching what escapeMindmapRich honors in the mindmap.
+func htmlEscapeRich(s string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range mdPattern.FindAllStringSubmatchIndex(s, -1) {
+		url := strings.TrimSpace(s[m[4]:m[5]])
+		if !safeLinkURLPattern.MatchString(url) {
+			continue
+		}
+		b.WriteString(html.EscapeString(s[last:m[0]]))
+		fmt.Fprintf(&b, `<a href="%s" target="_blank" rel="noopener noreferrer">%s</a>`,
+			html.EscapeString(url), html.EscapeString(s[m[2]:m[3]]))
+		last = m[1]
+	}
+	b.WriteString(html.EscapeString(s[last:]))
+	return b.String()
+}
+
+// buildVisualizationHeader renders the fixed header card: the manifest title
+// (or the generic product name when there is none), a muted subtitle, and the
+// description when present.
+func buildVisualizationHeader(meta manifestMeta) string {
+	if meta.Title == "" && meta.Description == "" {
+		return "<div class=\"bv-header\"><strong>bert.validator</strong><br>Validation Summary</div>\n"
+	}
+	var b strings.Builder
+	b.WriteString("<div class=\"bv-header\">")
+	if meta.Title != "" {
+		fmt.Fprintf(&b, "<strong>%s</strong><br>", htmlEscapeRich(meta.Title))
+	}
+	b.WriteString("<span class=\"bv-sub\">bert.validator — Validation Summary</span>")
+	if meta.Description != "" {
+		fmt.Fprintf(&b, "<div class=\"bv-desc\">%s</div>", htmlEscapeRich(meta.Description))
+	}
+	b.WriteString("</div>\n")
+	return b.String()
+}
+
 // buildVisualizationHTML assembles a single self-contained HTML file: the
 // vendored markmap/d3 bundles inlined as <script> tags, plus a small
 // bootstrap script that transforms the embedded Markdown into a mindmap
 // client-side (see assets/markmap/NOTICE.md for what's vendored and why).
-func buildVisualizationHTML(markdown string) (string, error) {
+//
+// The manifest title and description (if any) are shown in a fixed header
+// card and the page <title>; the header is built here from escaped text,
+// never from the Markdown, so it can't be used to inject markup.
+func buildVisualizationHTML(markdown string, meta manifestMeta) (string, error) {
 	mdJSON, err := json.Marshal(markdown)
 	if err != nil {
 		return "", err
@@ -432,12 +618,16 @@ func buildVisualizationHTML(markdown string) (string, error) {
 	var b strings.Builder
 	b.WriteString("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
 	b.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n")
-	b.WriteString("<title>bert.validator — Validation Summary</title>\n")
+	pageTitle := "bert.validator — Validation Summary"
+	if meta.Title != "" {
+		pageTitle = meta.Title + " — " + pageTitle
+	}
+	fmt.Fprintf(&b, "<title>%s</title>\n", html.EscapeString(pageTitle))
 	b.WriteString("<style>\n")
 	b.WriteString(visualizationBaseCSS)
 	b.Write(vendoredMarkmapToolbarCSS)
 	b.WriteString("\n</style>\n</head>\n<body>\n")
-	b.WriteString("<div class=\"bv-header\"><strong>bert.validator</strong><br>Validation Summary</div>\n")
+	b.WriteString(buildVisualizationHeader(meta))
 	b.WriteString("<svg id=\"mindmap\"></svg>\n")
 	b.WriteString("<script>")
 	b.Write(vendoredD3JS)
@@ -455,8 +645,8 @@ func buildVisualizationHTML(markdown string) (string, error) {
 
 // generateVisualization writes the HTML mindmap to outPath, or to a fresh
 // temp file when outPath is empty, returning the file's final path.
-func generateVisualization(results []summaryResult, outPath string) (string, error) {
-	html, err := buildVisualizationHTML(buildVisualizationMarkdown(results))
+func generateVisualization(results []summaryResult, outPath string, meta manifestMeta) (string, error) {
+	page, err := buildVisualizationHTML(buildVisualizationMarkdown(results, meta), meta)
 	if err != nil {
 		return "", err
 	}
@@ -467,7 +657,7 @@ func generateVisualization(results []summaryResult, outPath string) (string, err
 			return "", err
 		}
 		defer f.Close()
-		if _, err := f.WriteString(html); err != nil {
+		if _, err := f.WriteString(page); err != nil {
 			os.Remove(f.Name())
 			return "", err
 		}
@@ -479,7 +669,7 @@ func generateVisualization(results []summaryResult, outPath string) (string, err
 			return "", err
 		}
 	}
-	if err := os.WriteFile(outPath, []byte(html), 0o644); err != nil {
+	if err := os.WriteFile(outPath, []byte(page), 0o644); err != nil {
 		return "", err
 	}
 	return outPath, nil
