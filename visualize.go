@@ -207,15 +207,17 @@ var statusColors = map[string]string{
 	"SKIP": "#4a90d9",
 }
 
-// reviewPill renders the clickable "Needs Review" / "Reviewed" toggle for one
-// validation as inline HTML (the markdown-it renderer runs with `html: true`).
-// It is a real checkbox styled as a pill (see .bv-pill in the CSS), so the
-// label text switches in CSS and no extra markup is needed per state. Emitting
-// it as HTML rather than a Markdown task-list item lets markmap measure the
-// node at its true width. data-key identifies the item for state restore.
-func reviewPill(r summaryResult, checked string) string {
-	return fmt.Sprintf(`<label class="bv-pill"><input type="checkbox" class="bv-review" data-key="%s"%s><span></span></label>`,
-		html.EscapeString(r.ExecDisplay+"|"+r.ValidationID), checked)
+// reviewPill renders the clickable review-state button for one validation as
+// inline HTML (the markdown-it renderer runs with `html: true`). Clicking it
+// cycles data-state through "review" ("Needs Review"), "reviewed" ("Reviewed")
+// and "attn" ("Needs Attn") and back (see the bootstrap script). It is styled
+// as a pill (see .bv-pill in the CSS), so the label text switches in CSS and
+// no extra markup is needed per state. Emitting it as HTML rather than a
+// Markdown task-list item lets markmap measure the node at its true width.
+// data-key identifies the item for state restore.
+func reviewPill(r summaryResult, state string) string {
+	return fmt.Sprintf(`<button type="button" class="bv-pill" data-key="%s" data-state="%s"><span></span></button>`,
+		html.EscapeString(r.ExecDisplay+"|"+r.ValidationID), state)
 }
 
 // buildVisualizationMarkdown renders the validation summary as a Markmap
@@ -304,13 +306,13 @@ func buildVisualizationMarkdown(results []summaryResult, meta manifestMeta) stri
 		fmt.Fprintf(&b, "## %s %s (%d)\n\n", icons[status], status, len(items))
 		// Passed validations start out "Reviewed"; everything else "Needs
 		// Review" until the reader clicks it.
-		checked := ""
+		state := "review"
 		if status == "PASS" {
-			checked = " checked"
+			state = "reviewed"
 		}
 		for _, r := range items {
 			fmt.Fprintf(&b, "- %s **%s** `#%s` `%s` — _%s_%s\n",
-				reviewPill(r, checked), escapeMindmapRich(r.Name), escapeMindmapText(r.ExecDisplay), r.ValidationID, escapeMindmapText(r.Manifest),
+				reviewPill(r, state), escapeMindmapRich(r.Name), escapeMindmapText(r.ExecDisplay), r.ValidationID, escapeMindmapText(r.Manifest),
 				buildOutputDetails(r.Stdout, r.Stderr))
 			for _, note := range r.Notes {
 				fmt.Fprintf(&b, "  - %s\n", escapeMindmapRich(note))
@@ -391,21 +393,21 @@ body {
   stroke: #000;
   stroke-width: 1px;
 }
-/* Review toggle: a soft amber chip with a dot for "Needs Review", turning into
-   a soft green chip with a check for "Reviewed". The min-width fits the longer
-   label so toggling never changes the node's measured width. */
+/* Review button: a soft amber chip with a dot for "Needs Review", a soft green
+   chip with a check for "Reviewed" and a soft red chip with a "!" for
+   "Needs Attn". The min-width fits the longest label so cycling never changes
+   the node's measured width. */
 .bv-pill {
   display: inline-block;
   margin-right: 0.5rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
   vertical-align: middle;
   cursor: pointer;
   user-select: none;
-}
-.bv-pill input {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
 }
 .bv-pill span {
   display: inline-flex;
@@ -439,26 +441,41 @@ body {
 .bv-pill:hover span {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
 }
-.bv-pill input:focus-visible + span {
+.bv-pill:focus-visible span {
   outline: 2px solid #4a90d9;
   outline-offset: 2px;
 }
-.bv-pill input:checked + span {
+.bv-pill[data-state="reviewed"] span {
   border-color: #a7dfb4;
   background: #e8f7ec;
   color: #17692c;
 }
-.bv-pill input:checked + span::before {
-  content: '\2713';
+.bv-pill[data-state="attn"] span {
+  border-color: #f0a8a8;
+  background: #fdeaea;
+  color: #a12626;
+}
+.bv-pill[data-state="reviewed"] span::before,
+.bv-pill[data-state="attn"] span::before {
   width: auto;
   height: auto;
   border-radius: 0;
   background: none;
   font-size: 1.05em;
+  font-weight: 700;
   line-height: 1;
 }
-.bv-pill input:checked + span::after {
+.bv-pill[data-state="reviewed"] span::before {
+  content: '\2713';
+}
+.bv-pill[data-state="attn"] span::before {
+  content: '!';
+}
+.bv-pill[data-state="reviewed"] span::after {
   content: 'Reviewed';
+}
+.bv-pill[data-state="attn"] span::after {
+  content: 'Needs Attn';
 }
 .markmap-dark .bv-pill span {
   border-color: rgba(243, 190, 80, 0.45);
@@ -466,10 +483,15 @@ body {
   color: #f6c862;
   box-shadow: none;
 }
-.markmap-dark .bv-pill input:checked + span {
+.markmap-dark .bv-pill[data-state="reviewed"] span {
   border-color: rgba(76, 190, 105, 0.45);
   background: rgba(76, 190, 105, 0.16);
   color: #6fd58a;
+}
+.markmap-dark .bv-pill[data-state="attn"] span {
+  border-color: rgba(240, 110, 110, 0.5);
+  background: rgba(240, 110, 110, 0.16);
+  color: #f58f8f;
 }
 .bv-output {
   display: inline-block;
@@ -512,21 +534,25 @@ const visualizationBootstrapJS = `(function () {
   }
   var assets = transformer.getUsedAssets(features);
 
-  // markmap rewrites node content on re-render (e.g. fold/unfold), which
-  // recreates each review toggle in its initial state. Remember what the
-  // reader chose, keyed by data-key, and reapply it after every re-render.
+  // Each click on a review button advances it to the next state, wrapping
+  // back to the first. markmap rewrites node content on re-render (e.g.
+  // fold/unfold), which recreates every button in its initial state, so the
+  // reader's choice is remembered by data-key and reapplied after each
+  // re-render.
+  var REVIEW_STATES = ['review', 'reviewed', 'attn'];
   function keepReviewState(svgEl) {
     var states = Object.create(null);
-    svgEl.addEventListener('change', function (e) {
-      var box = e.target;
-      if (box && box.classList && box.classList.contains('bv-review')) {
-        states[box.dataset.key] = box.checked;
-      }
+    svgEl.addEventListener('click', function (e) {
+      var pill = e.target.closest && e.target.closest('.bv-pill');
+      if (!pill) return;
+      var next = REVIEW_STATES[(REVIEW_STATES.indexOf(pill.dataset.state) + 1) % REVIEW_STATES.length];
+      pill.dataset.state = next;
+      states[pill.dataset.key] = next;
     });
     function restore() {
-      svgEl.querySelectorAll('input.bv-review').forEach(function (box) {
-        var key = box.dataset.key;
-        if (key in states && box.checked !== states[key]) box.checked = states[key];
+      svgEl.querySelectorAll('.bv-pill').forEach(function (pill) {
+        var key = pill.dataset.key;
+        if (key in states && pill.dataset.state !== states[key]) pill.dataset.state = states[key];
       });
     }
     new MutationObserver(restore).observe(svgEl, { childList: true, subtree: true });
